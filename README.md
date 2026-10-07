@@ -56,21 +56,37 @@ az functionapp keys list -g <rg> -n <app> --query systemKeys.mcp_extension -o ts
 
 - 数据源：Azure Resource Manager Models API（主）+ 官方 [Model retirement schedule](https://learn.microsoft.com/azure/foundry/openai/concepts/model-retirement-schedule) 文档（辅）+ [Azure Retail Prices API](https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-retail-prices)（价格；零售标价，不含 Anthropic 等 Marketplace 模型）
 - 运行：Azure Functions Flex Consumption（Python），每日 08:00（Asia/Shanghai）
-- 部署：`azd up`，或在 Azure Cloud Shell 中运行 `deploy.sh`（两者共用 `infra/main.bicep`）
+- 部署：在 Azure Cloud Shell 中一键运行 `deploy.sh`，或 `azd up`（两者共用 `infra/main.bicep`）
 
-### 方式一：Azure Cloud Shell + deploy.sh（无需安装任何工具）
+### 方式一：Azure Cloud Shell 一键部署（无需安装任何工具）
 
-1. 打开 [Azure Cloud Shell](https://shell.azure.com)（选择 **Bash**）
-2. 执行：
-   ```bash
-   git clone https://github.com/pczhao1210/ms-foundry-notification.git
-   cd ms-foundry-notification
-   bash deploy.sh -e prod -l eastus2          # 首次：基础设施 + 代码
-   # bash deploy.sh -e prod --what-if         # 仅预览基础设施变更
-   # bash deploy.sh -e prod --skip-infra -y   # 之后仅更新代码
-   ```
+打开 [Azure Cloud Shell](https://shell.azure.com)（选择 **Bash**），执行：
 
-脚本只依赖 `az` 与 `python3`：订阅级 Bicep 部署 → 打包 `src/` → `az functionapp deployment source config-zip --build-remote true`（Flex Consumption 远程构建）→ 校验无 key 访问返回 401 → 输出端点与取 key 命令（不打印密钥值）。可重复执行（幂等）。
+```bash
+curl -fsSL https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/main/deploy.sh | bash -s -- -e prod -l eastus2
+```
+
+脚本会从本仓库下载 `infra/` 与 `src/` 到临时目录后部署，结束后自动清理。常用变体（`bash -s --` 之后即脚本参数）：
+
+```bash
+URL=https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/main/deploy.sh
+curl -fsSL $URL | bash -s -- -e prod --what-if            # 仅预览基础设施变更
+curl -fsSL $URL | bash -s -- -e prod --skip-infra -y      # 之后仅更新代码
+curl -fsSL $URL | bash -s -- -e prod -r <tag-or-commit>   # 部署指定版本（默认 main）
+curl -fsSL $URL | bash -s -- -h                           # 全部选项
+```
+
+也可以先克隆再运行（在仓库目录中运行且未指定 `-r` 时使用本地文件，便于部署本地修改）：
+
+```bash
+git clone https://github.com/pczhao1210/ms-foundry-notification.git
+cd ms-foundry-notification
+bash deploy.sh -e prod -l eastus2
+```
+
+脚本只依赖 `az`、`python3`、`curl`（Cloud Shell 均已内置）：获取源码 → 订阅级 Bicep 部署 → 打包 `src/` → `az functionapp deployment source config-zip --build-remote true`（Flex Consumption 远程构建）→ 校验无 key 访问返回 401 → 输出端点与取 key 命令（不打印密钥值）。可重复执行（幂等）。通过管道运行时仍会从终端读取部署确认；无终端（如 CI）时请加 `-y`。
+
+> `raw.githubusercontent.com` 有约 5 分钟缓存，刚推送的更改可能稍后才生效；需要精确版本时用 `-r <commit>`。
 
 所需权限：订阅级 **Owner**，或 Contributor + User Access Administrator（需为托管身份分配订阅级 Reader）。
 

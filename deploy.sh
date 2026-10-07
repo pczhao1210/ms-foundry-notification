@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# 不依赖 azd / func 的部署脚本，适用于 Azure Cloud Shell（仅需 az + python3）。
+# 不依赖 azd / func 的部署脚本，适用于 Azure Cloud Shell（仅需 az + python3 + curl）。
+# 支持 curl | bash 一键运行：源码从 GitHub 下载；在仓库 checkout 中运行且未指定 --ref 时使用本地文件。
 # 与 azd 共用 infra/main.bicep（订阅级部署），代码通过 Flex Consumption 的 zip 部署 + 远程构建发布。
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="${SCRIPT_DIR}/src"
-BICEP_FILE="${SCRIPT_DIR}/infra/main.bicep"
-
+REPO="${DEPLOY_REPO:-pczhao1210/ms-foundry-notification}"
 ENV_NAME="${AZURE_ENV_NAME:-}"
 LOCATION="${AZURE_LOCATION:-eastus2}"
 SUBSCRIPTION="${AZURE_SUBSCRIPTION_ID:-}"
+REF=""
 WHAT_IF=false
 SKIP_INFRA=false
 SKIP_CODE=false
 ASSUME_YES=false
 
 usage() {
-  cat <<'EOF'
-用法: bash deploy.sh -e <env-name> [选项]
+  cat <<EOF
+用法: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/deploy.sh | bash -s -- -e <env-name> [选项]
+      bash deploy.sh -e <env-name> [选项]
 
   -e, --env-name NAME       环境名（资源命名前缀，3-16 位小写字母/数字/-），也可用 AZURE_ENV_NAME
   -l, --location REGION     部署区域（默认 eastus2，需支持 Flex Consumption），也可用 AZURE_LOCATION
   -s, --subscription ID     目标订阅（默认当前 az 订阅），也可用 AZURE_SUBSCRIPTION_ID
+  -r, --ref REF             从 github.com/${REPO} 下载指定分支/标签/commit 的源码
+                            （默认 main；在仓库 checkout 中运行且未指定时使用本地文件）
       --what-if             仅预览基础设施变更，不做任何修改
       --skip-infra          跳过 Bicep，仅发布代码（需已部署过同名环境）
       --skip-code           仅部署基础设施，不发布代码
@@ -37,38 +39,41 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -e|--env-name)     ENV_NAME="${2:?}"; shift 2 ;;
-    -l|--location)     LOCATION="${2:?}"; shift 2 ;;
-    -s|--subscription) SUBSCRIPTION="${2:?}"; shift 2 ;;
-    --what-if)         WHAT_IF=true; shift ;;
-    --skip-infra)      SKIP_INFRA=true; shift ;;
-    --skip-code)       SKIP_CODE=true; shift ;;
-    -y|--yes)          ASSUME_YES=true; shift ;;
-    -h|--help)         usage; exit 0 ;;
-    *) usage >&2; die "未知参数: $1" ;;
-  esac
-done
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -e|--env-name)     ENV_NAME="${2:?}"; shift 2 ;;
+      -l|--location)     LOCATION="${2:?}"; shift 2 ;;
+      -s|--subscription) SUBSCRIPTION="${2:?}"; shift 2 ;;
+      -r|--ref)          REF="${2:?}"; shift 2 ;;
+      --what-if)         WHAT_IF=true; shift ;;
+      --skip-infra)      SKIP_INFRA=true; shift ;;
+      --skip-code)       SKIP_CODE=true; shift ;;
+      -y|--yes)          ASSUME_YES=true; shift ;;
+      -h|--help)         usage; exit 0 ;;
+      *) usage >&2; die "未知参数: $1" ;;
+    esac
+  done
+}
 
-[[ -n "$ENV_NAME" ]] || { usage >&2; die "缺少 --env-name"; }
-[[ "$ENV_NAME" =~ ^[a-z0-9][a-z0-9-]{1,14}[a-z0-9]$ ]] || die "env-name 需为 3-16 位小写字母/数字/-"
-$SKIP_INFRA && $SKIP_CODE && die "--skip-infra 与 --skip-code 不能同时使用"
-$SKIP_INFRA && $WHAT_IF && die "--what-if 只用于预览基础设施，不能与 --skip-infra 同时使用"
-
-command -v az >/dev/null      || die "未找到 az CLI（Cloud Shell 已内置）"
-command -v python3 >/dev/null || die "未找到 python3（用于打包 zip）"
-[[ -f "$BICEP_FILE" ]] || die "未找到 ${BICEP_FILE}（Phase 3 尚未完成？）"
-$SKIP_CODE || [[ -f "${SRC_DIR}/function_app.py" ]] || die "未找到 ${SRC_DIR}/function_app.py（Phase 2 尚未完成？）"
-
-az account show >/dev/null 2>&1 || die "未登录，请先运行 az login（Cloud Shell 已自动登录）"
-[[ -n "$SUBSCRIPTION" ]] && az account set --subscription "$SUBSCRIPTION"
-SUB_ID="$(az account show --query id -o tsv)"
-SUB_NAME="$(az account show --query name -o tsv)"
-DEPLOYMENT_NAME="foundry-notify-${ENV_NAME}"
-
-log "订阅: ${SUB_NAME} (${SUB_ID})"
-log "环境: ${ENV_NAME}   区域: ${LOCATION}   部署名: ${DEPLOYMENT_NAME}"
+# 设置 SOURCE_DIR：脚本旁有 infra/ 且未指定 --ref 时用本地 checkout，否则下载 GitHub 源码包。
+resolve_source() {
+  local script="${BASH_SOURCE[0]:-}" dir
+  if [[ -z "$REF" && -f "$script" ]]; then
+    dir="$(cd "$(dirname "$script")" && pwd)"
+    if [[ -f "${dir}/infra/main.bicep" ]]; then
+      SOURCE_DIR="$dir"
+      log "源码: 本地 ${SOURCE_DIR}"
+      return
+    fi
+  fi
+  REF="${REF:-main}"
+  SOURCE_DIR="${WORK_DIR}/source"
+  mkdir -p "$SOURCE_DIR"
+  log "源码: github.com/${REPO} @ ${REF}（下载中）"
+  curl -fsSL "https://github.com/${REPO}/archive/${REF}.tar.gz" | tar -xz -C "$SOURCE_DIR" --strip-components=1 2>/dev/null \
+    || die "下载源码失败，请确认 ${REF} 在 github.com/${REPO} 中存在"
+}
 
 # 订阅级角色分配权限检查（仅告警：自定义角色也可能具备权限）
 check_rbac_permission() {
@@ -142,10 +147,7 @@ PY
 }
 
 deploy_code() {
-  local zip_path
-  TMP_DIR="$(mktemp -d)"
-  trap 'rm -rf "$TMP_DIR"' EXIT
-  zip_path="${TMP_DIR}/app.zip"
+  local zip_path="${WORK_DIR}/app.zip"
   log "打包 src/ ..."
   package_src "$zip_path"
   log "发布代码到 ${FUNCTION_APP_NAME}（远程构建，约 1-3 分钟）..."
@@ -193,22 +195,60 @@ print_summary() {
 EOF
 }
 
-if ! $ASSUME_YES && ! $WHAT_IF; then
-  read -r -p "确认部署? [y/N] " reply
+confirm() {
+  local reply
+  if ! { : </dev/tty; } 2>/dev/null; then
+    die "无法交互确认，请加 -y"
+  fi
+  # curl | bash 时 stdin 是脚本本身，必须从终端读取
+  read -r -p "确认部署? [y/N] " reply </dev/tty
   [[ "$reply" =~ ^[Yy]$ ]] || die "已取消"
-fi
+}
 
-if ! $SKIP_INFRA; then
-  check_rbac_permission
-  register_providers
-  check_flex_location
-  deploy_infra
-  $WHAT_IF && exit 0
-fi
+main() {
+  parse_args "$@"
+  [[ -n "$ENV_NAME" ]] || { usage >&2; die "缺少 --env-name"; }
+  [[ "$ENV_NAME" =~ ^[a-z0-9][a-z0-9-]{1,14}[a-z0-9]$ ]] || die "env-name 需为 3-16 位小写字母/数字/-"
+  if $SKIP_INFRA && $SKIP_CODE; then die "--skip-infra 与 --skip-code 不能同时使用"; fi
+  if $SKIP_INFRA && $WHAT_IF; then die "--what-if 只用于预览基础设施，不能与 --skip-infra 同时使用"; fi
 
-read_outputs
-if ! $SKIP_CODE; then
-  deploy_code
-  verify
-fi
-print_summary
+  command -v az >/dev/null      || die "未找到 az CLI（Cloud Shell 已内置）"
+  command -v python3 >/dev/null || die "未找到 python3（用于打包 zip）"
+  command -v curl >/dev/null    || die "未找到 curl"
+  az account show >/dev/null 2>&1 || die "未登录，请先运行 az login（Cloud Shell 已自动登录）"
+
+  WORK_DIR="$(mktemp -d)"
+  trap 'rm -rf "$WORK_DIR"' EXIT
+  resolve_source
+  BICEP_FILE="${SOURCE_DIR}/infra/main.bicep"
+  SRC_DIR="${SOURCE_DIR}/src"
+  [[ -f "$BICEP_FILE" ]] || die "源码中未找到 infra/main.bicep"
+  $SKIP_CODE || [[ -f "${SRC_DIR}/function_app.py" ]] || die "源码中未找到 src/function_app.py"
+
+  if [[ -n "$SUBSCRIPTION" ]]; then az account set --subscription "$SUBSCRIPTION"; fi
+  SUB_ID="$(az account show --query id -o tsv)"
+  SUB_NAME="$(az account show --query name -o tsv)"
+  DEPLOYMENT_NAME="foundry-notify-${ENV_NAME}"
+  log "订阅: ${SUB_NAME} (${SUB_ID})"
+  log "环境: ${ENV_NAME}   区域: ${LOCATION}   部署名: ${DEPLOYMENT_NAME}"
+
+  if ! $ASSUME_YES && ! $WHAT_IF; then confirm; fi
+
+  if ! $SKIP_INFRA; then
+    check_rbac_permission
+    register_providers
+    check_flex_location
+    deploy_infra
+    if $WHAT_IF; then return; fi
+  fi
+
+  read_outputs
+  if ! $SKIP_CODE; then
+    deploy_code
+    verify
+  fi
+  print_summary
+}
+
+# 整个脚本下载并解析完毕后才执行，curl | bash 中途断网不会跑半截脚本
+main "$@"

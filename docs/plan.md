@@ -182,7 +182,7 @@ IaC：Flex Consumption（FC1，Python 3.12）+ Storage（`allowSharedKeyAccess=f
 | 方式 | 依赖 | 适用 |
 |---|---|---|
 | `azd up` | azd（+ az） | 本地开发、日常迭代 |
-| `bash deploy.sh -e <env> -l <region>` | 仅 `az` + `python3`（Cloud Shell 内置） | Azure Cloud Shell、无法安装 azd/func 的环境 |
+| `bash deploy.sh -e <env> -l <region>`（或 `curl -fsSL <raw>/main/deploy.sh \| bash -s -- -e <env>`） | 仅 `az` + `python3` + `curl`（Cloud Shell 内置） | Azure Cloud Shell 一键部署、无法安装 azd/func 的环境 |
 
 Bicep 契约（两种方式都依赖，修改时须同步）：
 - 参数：`environmentName`、`location`（azd 经 `infra/main.parameters.json` 映射 `${AZURE_ENV_NAME}`/`${AZURE_LOCATION}`）
@@ -190,7 +190,7 @@ Bicep 契约（两种方式都依赖，修改时须同步）：
 - 可选参数：`principalId`（azd 映射 `${AZURE_PRINCIPAL_ID}`）、`maximumInstanceCount`（默认 40）、`instanceMemoryMB`（默认 2048）
 - Flex 部署存储使用托管身份认证（`functionAppConfig.deployment.storage.authentication`），不依赖共享密钥
 
-`deploy.sh` 流程：参数校验 → 订阅 RBAC 权限预检（仅告警）→ 注册资源提供程序 → 校验区域支持 Flex（`az functionapp list-flexconsumption-locations`）→ `az deployment sub create`（`--what-if` 仅预览）→ 读取部署输出 → 打包 `src/`（排除 `.venv`/`__pycache__`/`local.settings.json`/`tests`）→ `az functionapp deployment source config-zip --build-remote true`（Python 在 Flex 上必须远程构建）→ 等待函数注册 + 无 key 调用应返回 401 → 打印端点与取 key 命令（**不打印密钥值**）。部署名固定为 `foundry-notify-<env>`，重复执行幂等；`--skip-infra` 仅发布代码。
+`deploy.sh` 流程：参数校验 → 获取源码（脚本位于仓库 checkout 且未指定 `-r/--ref` 时用本地文件；否则（如 `curl | bash`）下载 `github.com/<DEPLOY_REPO>/archive/<ref>.tar.gz` 到临时目录，ref 默认 `main`）→ 订阅 RBAC 权限预检（仅告警）→ 注册资源提供程序 → 校验区域支持 Flex（`az functionapp list-flexconsumption-locations`）→ `az deployment sub create`（`--what-if` 仅预览）→ 读取部署输出 → 打包 `src/`（排除 `.venv`/`__pycache__`/`local.settings.json`/`tests`）→ `az functionapp deployment source config-zip --build-remote true`（Python 在 Flex 上必须远程构建）→ 等待函数注册 + 无 key 调用应返回 401 → 打印端点与取 key 命令（**不打印密钥值**）。部署名固定为 `foundry-notify-<env>`，重复执行幂等；`--skip-infra` 仅发布代码。脚本主流程包在 `main()` 中、末行调用（管道下载中断不会执行半截脚本）；确认提示从 `/dev/tty` 读取，无终端时须加 `-y`。
 
 仓库：`https://github.com/pczhao1210/ms-foundry-notification`（MIT）。发布后可选：CI（GitHub Actions `Azure/functions-action` + OIDC）。
 

@@ -64,12 +64,14 @@ python -m pytest -q
 cd src && func start
 # 部署（二选一，共用 infra/main.bicep）
 azd up
-bash deploy.sh -e <env> -l eastus2          # Cloud Shell 友好，仅依赖 az + python3；--what-if / --skip-infra / --skip-code
+bash deploy.sh -e <env> -l eastus2          # Cloud Shell 友好，仅依赖 az + python3 + curl；--what-if / --skip-infra / --skip-code / -r <ref>
+curl -fsSL https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/main/deploy.sh | bash -s -- -e <env>   # 一键部署（从 GitHub 取源码）
 # 获取密钥（仅本人终端查看，勿提交/粘贴到 issue）
 az functionapp keys set -g <rg> -n <app> --key-type functionKeys --key-name <client>   # REST 调用方
 az functionapp keys list -g <rg> -n <app> --query systemKeys.mcp_extension -o tsv        # MCP
 ```
 > 本机 Azure CLI 通过 `uv tool install azure-cli` 安装于 `~/.local/bin/az`。
 > 修改 Bicep 参数/输出时须同时保证 azd 与 `deploy.sh` 可用：参数 `environmentName`、`location`；输出 `AZURE_RESOURCE_GROUP`、`AZURE_FUNCTION_APP_NAME`（`deploy.sh` 依赖）。
+> `deploy.sh` 须保持 `curl | bash` 可用：主流程放在 `main()` 并于末行调用；交互输入读 `/dev/tty`；源码路径只能来自 `resolve_source`（本地 checkout 或 GitHub tarball），不得假设脚本所在目录。
 > 仓库：https://github.com/pczhao1210/ms-foundry-notification（MIT）。
 > 以上命令在对应文件（requirements、azure.yaml 等）创建后生效；目录结构见 docs/plan.md §4。
