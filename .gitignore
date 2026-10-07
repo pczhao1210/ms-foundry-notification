@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Azure Functions
+local.settings.json
+.python_packages/
+bin/
+obj/
+__azurite_db*__.json
+__blobstorage__/
+__queuestorage__/
+.azurite/
+
+# azd
+.azure/
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+
+# Logs
+*.log

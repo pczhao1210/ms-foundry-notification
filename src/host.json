@@ -1,0 +1,26 @@
+{
+  "version": "2.0",
+  "functionTimeout": "00:30:00",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "excludedTypes": "Request;Exception"
+      }
+    }
+  },
+  "extensionBundle": {
+    "id": "Microsoft.Azure.Functions.ExtensionBundle",
+    "version": "[4.0.0, 5.0.0)"
+  },
+  "extensions": {
+    "mcp": {
+      "serverName": "foundry-model-changes",
+      "serverVersion": "1.0.0",
+      "instructions": "Read-only tools about Microsoft Foundry model lifecycle and retail price changes, collected daily at 00:00 UTC. Use get_today_changes / get_upcoming_changes / get_past_changes for change questions, search_models / get_model for the current catalog and get_model_prices for token prices. Dates are Asia/Shanghai calendar days; timestamps are UTC.",
+      "system": {
+        "webhookAuthorizationLevel": "System"
+      }
+    }
+  }
+}

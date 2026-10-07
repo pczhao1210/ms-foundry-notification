@@ -1,0 +1,6 @@
+azure-functions>=1.24.0
+azure-identity>=1.19
+azure-storage-blob>=12.24
+azure-data-tables>=12.6
+requests>=2.32
+tzdata
