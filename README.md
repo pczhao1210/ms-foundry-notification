@@ -106,7 +106,7 @@ bash deploy.sh
 
 脚本只依赖 `az`、`python3`、`curl`（Cloud Shell 均已内置）：选择部署选项 → 获取源码 → 订阅级 Bicep 部署 → 打包 `src/` → `az functionapp deployment source config-zip --build-remote true`（Flex Consumption 远程构建）→ 确认完整 13 个函数注册，REST/MCP 无 key 请求均返回 401 → 输出端点与取 key 命令（不打印密钥值）。验收失败会非零退出；仍需在本人终端使用调用方密钥验证实际 REST/MCP 查询。`--what-if` 不注册资源提供程序或部署资源。相同配置可重复执行（幂等）。通过管道运行时向导与部署确认均从 `/dev/tty` 读取；无终端（如 CI）时请加 `-y`。
 
-正式部署使用 `--validation-level Template`（需 Azure CLI 2.76.0 或更新版本），作为新资源组订阅级部署的 Provider 预验证兼容措施。模板仍负责创建资源组，实际部署仍执行权限与资源校验；`--what-if` 保留默认 Provider 检查。若出现 `Resource group 'None' could not be found`，仅凭该信息无法确认根因，需要结合 CLI 版本及部署错误进一步诊断。
+正式部署与 `--what-if` 均保留默认 Provider 检查。部署输出按 JSON 读取，只有状态为 `Succeeded` 且 `AZURE_RESOURCE_GROUP` / `AZURE_FUNCTION_APP_NAME` 都是有效名称时才查询 Function App、发布代码。日志会分别标明部署、读取输出及目标资源；缺失输出直接报错，不会将 TSV 的 `None` 当作资源名称。向导回车保留显示的默认值；若旧脚本报 `Resource group 'None' could not be found`，需先检查同名订阅部署的状态与 Outputs，不能据此认定向导丢失了默认值。
 
 > `raw.githubusercontent.com` 有约 5 分钟缓存，刚推送的更改可能稍后才生效；需要精确版本时用 `-r <commit>`。
 

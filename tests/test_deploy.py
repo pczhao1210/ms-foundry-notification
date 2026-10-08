@@ -1,4 +1,5 @@
 import fcntl
+import json
 import os
 import pty
 import select
@@ -34,7 +35,7 @@ case "$*" in
   'provider register'*) exit 0 ;;
   'functionapp list-flexconsumption-locations'*) printf '1\\n' ;;
   'deployment sub what-if'*) exit 0 ;;
-  'deployment sub show'*) printf 'review-group\\treview-app\\n' ;;
+    'deployment sub show'*) printf '%s\\n' "$MOCK_DEPLOYMENT_OUTPUTS" ;;
   'functionapp show'*) printf 'offline.invalid\\n' ;;
   'functionapp deployment source config-zip'*) exit 0 ;;
   'functionapp function list'*) printf '%s\\n' "$MOCK_FUNCTIONS" ;;
@@ -42,7 +43,9 @@ case "$*" in
 esac
 """,
         "curl": """printf 'curl %s\\n' "$*" >>"$CALL_LOG"
-if [[ "$*" == *'/runtime/webhooks/mcp'* ]]; then
+if [[ "$*" == *'/archive/'* ]]; then
+    tar -cz -C "$MOCK_SOURCE_ROOT" --transform='s,^,offline-source/,' infra/main.bicep src/function_app.py
+elif [[ "$*" == *'/runtime/webhooks/mcp'* ]]; then
   printf '%s' "${MOCK_MCP_CODE:-401}"
 else
   printf '%s' "${MOCK_REST_CODE:-401}"
@@ -56,16 +59,23 @@ fi
         command.chmod(0o755)
     log = tmp_path / "calls.log"
 
-    def run(*args, answers=None, environment="review", **overrides):
+    def run(*args, answers=None, environment="review", piped=False, **overrides):
         env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "CALL_LOG": str(log),
+               "MOCK_SOURCE_ROOT": str(ROOT),
                "AZURE_SUBSCRIPTION_ID": "", "AZURE_LOCATION": "eastus2",
                "AZURE_ENV_NAME": "", "AZURE_RESOURCE_GROUP": "", "AZURE_RESOURCE_NAME_PREFIX": "",
                "MOCK_SUBSCRIPTIONS": '[{"name":"Offline review","id":"offline-review"}]',
+               "MOCK_DEPLOYMENT_OUTPUTS": json.dumps({"state": "Succeeded", "outputs": {
+                   "AZURE_RESOURCE_GROUP": {"type": "String", "value": "review-group"},
+                   "AZURE_FUNCTION_APP_NAME": {"type": "String", "value": "review-app"},
+               }}),
                "MOCK_FUNCTIONS": "\n".join(f"review-app/{name}" for name in FUNCTIONS), **overrides}
         environment_args = ["-e", environment] if environment is not None else []
-        command = ["bash", str(ROOT / "deploy.sh"), *environment_args, *args]
+        command = ["bash", *(["-s", "--"] if piped else [str(ROOT / "deploy.sh")]), *environment_args, *args]
+        script = (ROOT / "deploy.sh").read_text() if piped else None
         if answers is None:
-            result = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+            result = subprocess.run(command, cwd=ROOT, env=env, input=script,
+                                    text=True, capture_output=True, timeout=30)
         else:
             master, slave = pty.openpty()
 
@@ -73,7 +83,8 @@ fi
                 os.setsid()
                 fcntl.ioctl(1, termios.TIOCSCTTY, 0)
 
-            process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+            process = subprocess.Popen(command, cwd=ROOT, env=env,
+                                       stdin=subprocess.PIPE if piped else subprocess.DEVNULL,
                                        stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
             os.close(slave)
             output = b""
@@ -81,6 +92,9 @@ fi
             responses = iter(answers)
             deadline = time.monotonic() + 20
             try:
+                if piped:
+                    process.stdin.write(script.encode())
+                    process.stdin.close()
                 while time.monotonic() < deadline:
                     ready, _, _ = select.select([master], [], [], 0.2)
                     if not ready:
@@ -132,11 +146,11 @@ def test_alerts_default_to_disabled(deploy):
     assert any("enableCollectionAlerts=false" in call for call in calls)
 
 
-def test_subscription_deployment_uses_template_validation(deploy):
+def test_subscription_deployment_keeps_provider_validation(deploy):
     result, calls = deploy("--skip-code", "-y")
     assert result.returncode == 0, result.stderr
     deployment = next(call for call in calls if call.startswith("az deployment sub create"))
-    assert "--validation-level Template" in deployment
+    assert "--validation-level" not in deployment
     assert "resourceGroupName=rg-review" in deployment
     assert not any(call.startswith("az group create") for call in calls)
 
@@ -211,13 +225,68 @@ def test_existing_resource_group_keeps_its_metadata_location(deploy):
     assert "resourceGroupLocation=westus2" in deployment
 
 
-def test_default_environment_needs_no_arguments(deploy):
-    result, calls = deploy("--skip-code", environment=None, answers=["", "", "", "y"])
+@pytest.mark.parametrize("piped", [False, True])
+def test_default_environment_needs_no_arguments(deploy, piped):
+    result, calls = deploy("--skip-code", environment=None, piped=piped, answers=["2", "", "", "", "y"],
+                           MOCK_SUBSCRIPTIONS='[{"name":"Current","id":"offline-review"},'
+                                              '{"name":"Other","id":"offline-other"}]')
     assert result.returncode == 0, result.stderr
+    assert "az account set --subscription offline-other" in calls
     deployment = next(call for call in calls if call.startswith("az deployment sub create"))
-    assert "environmentName=foundry-notify" in deployment
-    assert "resourceGroupName=rg-foundry-notify" in deployment
-    assert "resourceNamePrefix=foundry-notify" in deployment
+    arguments = deployment.split()
+    assert arguments[arguments.index("--location") + 1] == "eastus2"
+    assert "environmentName=foundry-notify" in arguments
+    assert "location=eastus2" in arguments
+    assert "resourceGroupName=rg-foundry-notify" in arguments
+    assert "resourceGroupLocation=eastus2" in arguments
+    assert "resourceNamePrefix=foundry-notify" in arguments
+    if piped:
+        assert any("/archive/main.tar.gz" in call for call in calls)
+
+
+@pytest.mark.parametrize("group, app", [(None, None), (None, "review-app"), ("review-group", None),
+                                        ("None", "review-app"), ("review-group", "null"),
+                                        ("", "review-app"), ("review-group", " "),
+                                        ({"value": "review-group"}, "review-app"),
+                                        ("review-group", 123)])
+def test_invalid_deployment_outputs_stop_before_function_lookup(deploy, group, app):
+    outputs = {"state": "Succeeded", "outputs": {
+        "AZURE_RESOURCE_GROUP": {"type": "String", "value": group},
+        "AZURE_FUNCTION_APP_NAME": {"type": "String", "value": app},
+    }}
+    result, calls = deploy("--skip-code", environment=None, answers=["", "", "", "y"],
+                           MOCK_DEPLOYMENT_OUTPUTS=json.dumps(outputs))
+    assert result.returncode != 0
+    assert "部署输出" in result.stderr
+    assert not any(call.startswith("az functionapp show") for call in calls)
+
+
+@pytest.mark.parametrize("outputs", [None, {}, {"AZURE_RESOURCE_GROUP": {"value": "review-group"}}])
+def test_missing_deployment_outputs_stop_code_only_deployment(deploy, outputs):
+    result, calls = deploy("--skip-infra", "-y",
+                           MOCK_DEPLOYMENT_OUTPUTS=json.dumps({"state": "Succeeded", "outputs": outputs}))
+    assert result.returncode != 0
+    assert "部署输出无效" in result.stderr
+    assert not any(call.startswith("az functionapp") for call in calls)
+
+
+@pytest.mark.parametrize("state", ["Failed", "Running", None])
+def test_unsuccessful_deployment_stops_before_function_lookup(deploy, state):
+    result, calls = deploy("--skip-infra", "-y",
+                           MOCK_DEPLOYMENT_OUTPUTS=json.dumps({"state": state, "outputs": {}}))
+    assert result.returncode != 0
+    assert "不是 Succeeded" in result.stderr
+    assert not any(call.startswith("az functionapp") for call in calls)
+
+
+def test_deployment_outputs_are_read_as_json(deploy):
+    result, calls = deploy("--skip-infra", "-y")
+    assert result.returncode == 0, result.stderr
+    outputs = next(call for call in calls if call.startswith("az deployment sub show"))
+    assert "-o json" in outputs
+    assert "outputs:properties.outputs" in outputs
+    assert "资源组=review-group   Function App=review-app" in result.stdout
+    assert "az functionapp show -g review-group -n review-app --query defaultHostName -o tsv" in calls
 
 
 def test_cancelled_wizard_does_not_deploy(deploy):

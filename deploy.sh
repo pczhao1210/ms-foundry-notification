@@ -221,16 +221,41 @@ deploy_infra() {
     return
   fi
   log "部署基础设施 (Bicep, 订阅级) ..."
-  az deployment sub create "${args[@]}" --validation-level Template -o none
+  az deployment sub create "${args[@]}" -o none
 }
 
 read_outputs() {
-  local outputs
+  local outputs names
+  log "读取部署 ${DEPLOYMENT_NAME} 的状态与输出 ..."
   outputs="$(az deployment sub show --name "$DEPLOYMENT_NAME" \
-    --query "[properties.outputs.AZURE_RESOURCE_GROUP.value, properties.outputs.AZURE_FUNCTION_APP_NAME.value]" \
-    -o tsv 2>/dev/null)" || die "找不到部署 ${DEPLOYMENT_NAME} 的输出，请先不带 --skip-infra 运行一次"
-  read -r RESOURCE_GROUP FUNCTION_APP_NAME <<<"$(tr '\n' ' ' <<<"$outputs")"
-  [[ -n "${RESOURCE_GROUP:-}" && -n "${FUNCTION_APP_NAME:-}" ]] || die "部署输出缺少 AZURE_RESOURCE_GROUP / AZURE_FUNCTION_APP_NAME"
+    --query '{state:properties.provisioningState,outputs:properties.outputs}' \
+    -o json)" || die "无法读取部署 ${DEPLOYMENT_NAME}，请检查所选订阅；首次部署不要带 --skip-infra"
+  names="$(python3 -c '
+import json, sys
+try:
+    deployment = json.load(sys.stdin)
+except ValueError:
+    sys.exit("部署输出不是有效 JSON")
+if not isinstance(deployment, dict):
+    sys.exit("部署输出不是 JSON 对象")
+state = deployment.get("state")
+if state != "Succeeded":
+    sys.exit(f"部署状态为 {state!r}，不是 Succeeded")
+outputs = deployment.get("outputs")
+if not isinstance(outputs, dict):
+    sys.exit("部署 outputs 缺失或不是 JSON 对象")
+names = []
+for key in ("AZURE_RESOURCE_GROUP", "AZURE_FUNCTION_APP_NAME"):
+    output = outputs.get(key)
+    value = output.get("value") if isinstance(output, dict) else None
+    if (not isinstance(value, str) or not value or value in ("None", "null")
+            or any(character.isspace() for character in value)):
+        sys.exit(f"部署输出 {key} 缺失或不是有效资源名称")
+    names.append(value)
+print("\t".join(names))
+' <<<"$outputs")" || die "部署输出无效，已停止发布；请检查部署 ${DEPLOYMENT_NAME} 的状态与 Outputs"
+  read -r RESOURCE_GROUP FUNCTION_APP_NAME <<<"$names"
+  log "部署输出: 资源组=${RESOURCE_GROUP}   Function App=${FUNCTION_APP_NAME}"
   FUNCTION_APP_HOST="$(az functionapp show -g "$RESOURCE_GROUP" -n "$FUNCTION_APP_NAME" --query defaultHostName -o tsv)"
 }
 
