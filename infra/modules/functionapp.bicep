@@ -43,6 +43,12 @@ resource site 'Microsoft.Web/sites@2024-04-01' = {
     siteConfig: {
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
+      cors: {
+        allowedOrigins: [
+          'https://portal.azure.com'
+        ]
+        supportCredentials: false
+      }
       appSettings: [
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'AzureWebJobsStorage__clientId', value: identityClientId }

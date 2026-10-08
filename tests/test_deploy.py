@@ -180,7 +180,8 @@ def test_existing_subscription_reader_assignment_is_forwarded(deploy, args):
     assert not any(call.startswith("az role assignment delete") for call in calls)
 
 
-def test_subscription_reader_assignment_template_tracks_principal():
+@pytest.fixture(scope="module")
+def infrastructure_template():
     compiler = Path(shutil.which("bicep") or Path.home() / ".azure" / "bin" / "bicep")
     if not compiler.is_file():
         pytest.skip("Bicep compiler is required for the offline infrastructure contract test")
@@ -188,7 +189,11 @@ def test_subscription_reader_assignment_template_tracks_principal():
                             env={**os.environ, "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1"},
                             text=True, capture_output=True, timeout=60)
     assert result.returncode == 0, result.stderr
-    template = json.loads(result.stdout)
+    return json.loads(result.stdout)
+
+
+def test_subscription_reader_assignment_template_tracks_principal(infrastructure_template):
+    template = infrastructure_template
     reader = next(resource for resource in template["resources"]
                   if resource["name"] == "[format('subscription-reader-{0}', variables('resourceSuffix'))]")
     params = reader["properties"]["parameters"]
@@ -211,6 +216,17 @@ def test_subscription_reader_assignment_template_tracks_principal():
     assert assignment["properties"]["roleDefinitionId"] == (
         "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('readerRoleId'))]"
     )
+
+
+def test_portal_test_run_cors_allows_only_azure_portal(infrastructure_template):
+    module = next(resource for resource in infrastructure_template["resources"]
+                  if resource["name"] == "functionapp")
+    site = next(resource for resource in module["properties"]["template"]["resources"]
+                if resource["type"] == "Microsoft.Web/sites")
+    assert site["properties"]["siteConfig"]["cors"] == {
+        "allowedOrigins": ["https://portal.azure.com"],
+        "supportCredentials": False,
+    }
 
 
 def test_what_if_keeps_provider_validation(deploy):

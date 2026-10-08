@@ -64,6 +64,8 @@ MCP Server（Functions MCP 扩展，Streamable HTTP，system key `mcp_extension`
 - **禁止分发 master key**（`_master` 可访问所有端点与管理 API）。
 - 密钥只通过 `az functionapp keys list/set` 获取，不写入仓库、不在 azd 输出中打印；文档只给出获取命令。
 - 平台约束：HTTPS only、TLS ≥ 1.2、`ftpsState=Disabled`、禁用 basic publishing credentials。
+- 门户手动测试：`siteConfig.cors.allowedOrigins` 仅包含 `https://portal.azure.com`，`supportCredentials=false`，不允许通配符。跨域白名单只支持门户浏览器调用，不绕过密钥认证；手动触发 `daily_collect` 的 `/admin/functions/` 管理端点仍需在门户选择 `_master`，不得分发或输出密钥值。REST/MCP 只读查询不提供触发采集的能力。
+- `HTTP 0` / `Failed to fetch` 不是函数返回的 HTTP 状态，可能由 CORS、客户端 DNS/TLS、代理或访问限制导致。缺少门户 CORS 是模板可修复的原因，但现场根因仍需网络请求确认；先检查是否已有调用记录，不盲目重复触发。旧部署可通过 `az functionapp cors add --allowed-origins https://portal.azure.com` 补充白名单，不必重发代码；HTTP 202 只表示接受请求，采集结果以调用记录为准。离线编译测试校验精确来源和凭据开关，云端浏览器行为仍需实测。
 - 本地 `func start` 不校验 key（Functions 本地行为），本地测试无需 key。
 - 升级路径（若日后具备 Entra 权限）：开启 Easy Auth + `WEBSITE_AUTH_PRM_DEFAULT_WITH_SCOPES` 实现 MCP OAuth；或前置 APIM 做 key/OAuth/限流。
 

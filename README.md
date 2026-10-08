@@ -138,6 +138,20 @@ azd up        # 提示输入环境名 / 订阅 / 区域
 
 最新快照使用轻量索引读取，旧存储布局会在下次成功采集后自动建立索引。各来源报告保存在 snapshots 容器的 `status/{kind}.json.gz` 与 `runs/YYYY-MM-DD/{kind}.json.gz`；日报保留当天最后一次尝试。
 
+### 手动运行与门户排查
+
+在 Azure 门户打开函数应用 → 函数 → `daily_collect` → 代码 + 测试 → 测试/运行，密钥下拉框选择 `_master`，请求体可填 `{"input":""}`，然后运行一次。此操作使用 `/admin/functions/daily_collect` 管理端点，普通 host key 与 `mcp_extension` 不适用；只在门户选择密钥，不复制、分发或记录密钥值。HTTP 202 仅表示请求已接受，最终结果在监视/调用记录中查看，不要并发触发。
+
+门户出现 `HTTP 0` / `Failed to fetch` 表示浏览器没有拿到可读取的 HTTP 响应，不能仅凭它断定采集失败或密钥错误。先查看调用记录，避免请求已提交却再次触发；再检查浏览器开发者工具中的 CORS、DNS/TLS、代理或访问限制错误。模板仅允许 CORS 来源 `https://portal.azure.com`，不使用通配符且 `supportCredentials=false`；这不会取消 Function Key 认证。旧部署可在原订阅的 Cloud Shell 中检查并补充门户来源，无需重新发布代码：
+
+```bash
+az functionapp cors show -g <resource-group> -n <function-app>
+az functionapp cors add -g <resource-group> -n <function-app> \
+  --allowed-origins https://portal.azure.com -o none
+```
+
+保存后刷新门户再测试。若仍报错，只分享去除密钥和敏感请求头后的网络错误信息；不要为排查而关闭鉴权或添加 `*` 来源。
+
 ### 可选采集告警
 
 首次采集成功后，可运行 `bash deploy.sh -e <env> --skip-code --enable-alerts` 启用采集健康告警；azd 用户在 `infra/main.parameters.json` 将 `enableCollectionAlerts.value` 改为 true 后重新 provision。规则每小时检查最近采集是否失败、是否超过 32 小时没有完成调用。默认不创建规则，启用可能产生 Azure Monitor 费用。
