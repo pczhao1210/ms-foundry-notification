@@ -225,7 +225,7 @@ deploy_infra() {
 }
 
 read_outputs() {
-  local outputs names
+  local outputs names app
   log "读取部署 ${DEPLOYMENT_NAME} 的状态与输出 ..."
   outputs="$(az deployment sub show --name "$DEPLOYMENT_NAME" \
     --query '{state:properties.provisioningState,outputs:properties.outputs}' \
@@ -263,7 +263,33 @@ print("\t".join(names))
 ' <<<"$outputs")" || die "部署输出无效，已停止发布；请检查部署 ${DEPLOYMENT_NAME} 的状态与 Outputs"
   read -r RESOURCE_GROUP FUNCTION_APP_NAME <<<"$names"
   log "部署输出: 资源组=${RESOURCE_GROUP}   Function App=${FUNCTION_APP_NAME}"
-  FUNCTION_APP_HOST="$(az functionapp show -g "$RESOURCE_GROUP" -n "$FUNCTION_APP_NAME" --query defaultHostName -o tsv)"
+  app="$(az functionapp show -g "$RESOURCE_GROUP" -n "$FUNCTION_APP_NAME" -o json)" \
+    || die "无法读取 Function App ${FUNCTION_APP_NAME} 的主机名"
+  FUNCTION_APP_HOST="$(python3 -c '
+import json, re, sys
+try:
+    app = json.load(sys.stdin)
+except ValueError:
+    sys.exit("Function App 主机名响应不是有效 JSON")
+if not isinstance(app, dict):
+    sys.exit("Function App 主机名响应不是 JSON 对象")
+matches = [value for key, value in app.items() if key.casefold() == "defaulthostname"]
+if not matches:
+    fields = json.dumps(sorted(app), ensure_ascii=False)
+    sys.exit(f"Function App 缺少 defaultHostName 主机名字段；实际字段: {fields}")
+if len(matches) != 1:
+    sys.exit("Function App 主机名字段 defaultHostName 存在大小写冲突")
+host = matches[0]
+if not isinstance(host, str) or not host or len(host) > 253:
+    sys.exit("Function App 主机名不是有效 DNS 名称")
+labels = host.split(".")
+if len(labels) < 2 or any(
+        not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+        for label in labels):
+    sys.exit("Function App 主机名不是有效 DNS 名称")
+print(host)
+' <<<"$app")" || die "Function App 主机名无效，已停止发布与验收"
+  log "Function App 主机名: ${FUNCTION_APP_HOST}"
 }
 
 package_src() {

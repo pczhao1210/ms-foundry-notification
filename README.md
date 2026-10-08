@@ -108,6 +108,8 @@ bash deploy.sh
 
 正式部署与 `--what-if` 均保留默认 Provider 检查。部署输出通过 `az deployment sub show` 按 JSON 读取，只有状态为 `Succeeded` 且 `AZURE_RESOURCE_GROUP` / `AZURE_FUNCTION_APP_NAME` 都是有效名称时才查询 Function App、发布代码。输出键按不区分大小写的方式唯一匹配，兼容实际 ARM 返回的 `azurE_RESOURCE_GROUP` / `azurE_FUNCTION_APP_NAME`，不改写资源名称值；若出现多个大小写不同的同名键则报错停止。日志区分部署、读取输出及目标资源；缺失或无效输出时只报告字段名及类型，不打印字段值，不会将 TSV 的 `None` 当作资源名称。向导回车保留显示的默认值。若基础设施已经成功，仅在输出读取阶段失败，可使用更新后的脚本加 `--skip-infra` 在相同订阅和环境下继续，不必重新部署基础设施。
 
+Function App 主机名同样通过 `az functionapp show -o json` 读取，唯一匹配 `defaultHostName` / `defaultHostname` 等大小写变体，并验证为有效 DNS 名称后才发布代码。主机名缺失、空值、字段冲突或读取失败都会停止，不再拼出 `https:///api/...`，也不会根据应用名猜测域名。旧脚本若在函数注册后报告 `Could not resolve host: api`，应先检查主机名读取结果，而非据此判断区域 DNS 故障；使用修复后的脚本加 `--skip-infra` 可重新发布代码并验收，无需重建基础设施。
+
 > `raw.githubusercontent.com` 有约 5 分钟缓存，刚推送的更改可能稍后才生效；需要精确版本时用 `-r <commit>`。
 
 所需权限：订阅级 **Owner**，或 Contributor + User Access Administrator（需为托管身份分配订阅级 Reader）。

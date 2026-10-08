@@ -41,7 +41,12 @@ case "$*" in
             exit 1
         fi
         printf '%s\\n' "$MOCK_DEPLOYMENT_OUTPUTS" ;;
-  'functionapp show'*) printf 'offline.invalid\\n' ;;
+    'functionapp show'*)
+        if [[ -n "${MOCK_FUNCTION_APP_READ_ERROR:-}" ]]; then
+            printf '%s\\n' "$MOCK_FUNCTION_APP_READ_ERROR" >&2
+            exit 1
+        fi
+        printf '%s\\n' "$MOCK_FUNCTION_APP" ;;
   'functionapp deployment source config-zip'*) exit 0 ;;
   'functionapp function list'*) printf '%s\\n' "$MOCK_FUNCTIONS" ;;
   *) printf 'unexpected az command: %s\\n' "$*" >&2; exit 99 ;;
@@ -74,6 +79,7 @@ fi
                    "AZURE_RESOURCE_GROUP": {"type": "String", "value": "review-group"},
                    "AZURE_FUNCTION_APP_NAME": {"type": "String", "value": "review-app"},
                }}),
+               "MOCK_FUNCTION_APP": json.dumps({"defaultHostname": "offline.invalid"}),
                "MOCK_FUNCTIONS": "\n".join(f"review-app/{name}" for name in FUNCTIONS), **overrides}
         environment_args = ["-e", environment] if environment is not None else []
         command = ["bash", *(["-s", "--"] if piped else [str(ROOT / "deploy.sh")]), *environment_args, *args]
@@ -184,6 +190,54 @@ def test_missing_mcp_function_is_a_failed_deployment(deploy):
     assert not any(call.startswith("curl ") for call in calls)
 
 
+@pytest.mark.parametrize("host", [None, "", " ", "None", "null", 123, {}, [],
+                                 "https://offline.invalid", "offline.invalid/api", "offline.invalid:443",
+                                 "offline.invalid\n", "offline.invalid\tother.invalid", "user@offline.invalid",
+                                 "-offline.invalid", "offline..invalid", "a" * 64 + ".invalid",
+                                 ".".join(["a" * 63] * 4)])
+def test_invalid_function_app_host_stops_before_publish(deploy, host):
+    result, calls = deploy("--skip-infra", "-y", MOCK_FUNCTION_APP=json.dumps({"defaultHostName": host}))
+    assert result.returncode != 0
+    assert "主机名" in result.stderr
+    assert not any("config-zip" in call or call.startswith("curl ") for call in calls)
+
+
+@pytest.mark.parametrize("key", ["defaultHostName", "defaultHostname", "defaulthostname", "DEFAULTHOSTNAME"])
+@pytest.mark.parametrize("piped", [False, True])
+def test_function_app_host_accepts_key_casing(deploy, key, piped):
+    host = "review-app-123.japaneast-01.azurewebsites.net"
+    result, calls = deploy("--skip-infra", "-y", piped=piped,
+                           MOCK_FUNCTION_APP=json.dumps({key: host}))
+    assert result.returncode == 0, result.stderr
+    assert "az functionapp show -g review-group -n review-app -o json" in calls
+    probes = [call for call in calls if call.startswith("curl ") and "/archive/" not in call]
+    assert len(probes) == 2
+    assert probes[0].endswith(f"https://{host}/api/changes/today")
+    assert probes[1].endswith(f"https://{host}/runtime/webhooks/mcp")
+    assert f"REST   : https://{host}/api/changes/today" in result.stdout
+    assert f"MCP    : https://{host}/runtime/webhooks/mcp" in result.stdout
+
+
+@pytest.mark.parametrize("response", ["", "not-json", "null", "[]", "{}",
+                                     '{"other":"must-not-log-value"}',
+                                     '{"defaultHostName":"offline.invalid",'
+                                     '"defaultHostname":"must-not-log-value"}'])
+def test_invalid_function_app_response_stops_before_publish(deploy, response):
+    result, calls = deploy("--skip-infra", "-y", MOCK_FUNCTION_APP=response)
+    assert result.returncode != 0
+    assert "主机名" in result.stderr
+    assert "must-not-log-value" not in result.stdout + result.stderr
+    assert not any("config-zip" in call or call.startswith("curl ") for call in calls)
+
+
+def test_function_app_read_failure_stops_before_publish(deploy):
+    result, calls = deploy("--skip-infra", "-y", MOCK_FUNCTION_APP_READ_ERROR="offline lookup failed")
+    assert result.returncode != 0
+    assert "offline lookup failed" in result.stderr
+    assert "无法读取 Function App" in result.stderr
+    assert not any("config-zip" in call or call.startswith("curl ") for call in calls)
+
+
 def test_success_requires_all_functions_and_both_authenticated_endpoints(deploy):
     result, calls = deploy("--skip-infra", "-y")
     assert result.returncode == 0, result.stderr
@@ -191,8 +245,8 @@ def test_success_requires_all_functions_and_both_authenticated_endpoints(deploy)
     probes = [call for call in calls if call.startswith("curl ")]
     assert len(probes) == 2
     assert all("--connect-timeout 10 --max-time 30" in call for call in probes)
-    assert "/api/changes/today" in probes[0]
-    assert "/runtime/webhooks/mcp" in probes[1] and "initialize" in probes[1]
+    assert probes[0].endswith("https://offline.invalid/api/changes/today")
+    assert probes[1].endswith("https://offline.invalid/runtime/webhooks/mcp") and "initialize" in probes[1]
     assert not any(call.startswith("az functionapp keys") for call in calls)
 
 
@@ -302,7 +356,7 @@ def test_deployment_outputs_accept_key_casing(deploy, group_key, app_key):
     assert "-o json" in outputs
     assert "outputs:properties.outputs" in outputs
     assert "资源组=review-group   Function App=review-app" in result.stdout
-    assert "az functionapp show -g review-group -n review-app --query defaultHostName -o tsv" in calls
+    assert "az functionapp show -g review-group -n review-app -o json" in calls
     assert any("config-zip -g review-group -n review-app" in call for call in calls)
 
 
