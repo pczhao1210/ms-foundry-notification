@@ -277,12 +277,17 @@ except ValueError:
     sys.exit("Function App 主机名响应不是有效 JSON")
 if not isinstance(app, dict):
     sys.exit("Function App 主机名响应不是 JSON 对象")
-matches = [value for key, value in app.items() if key.casefold() == "defaulthostname"]
+containers = {"topLevel": app}
+if isinstance(app.get("properties"), dict):
+  containers["properties"] = app["properties"]
+matches = [value for container in containers.values() for key, value in container.items()
+       if key.casefold() == "defaulthostname"]
 if not matches:
-    fields = json.dumps(sorted(app), ensure_ascii=False)
-    sys.exit(f"Function App 缺少 defaultHostName 主机名字段；实际字段: {fields}")
+    fields = {path: sorted(container) for path, container in containers.items()}
+    sys.exit("Function App 缺少 defaultHostName 主机名字段；实际字段: "
+             + json.dumps(fields, ensure_ascii=False))
 if len(matches) != 1:
-    sys.exit("Function App 主机名字段 defaultHostName 存在大小写冲突")
+  sys.exit("Function App 主机名字段 defaultHostName 存在跨层重复或大小写冲突")
 host = matches[0]
 if not isinstance(host, str) or not host or len(host) > 253:
     sys.exit("Function App 主机名不是有效 DNS 名称")

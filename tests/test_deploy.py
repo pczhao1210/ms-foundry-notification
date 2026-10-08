@@ -81,7 +81,7 @@ fi
                    "AZURE_RESOURCE_GROUP": {"type": "String", "value": "review-group"},
                    "AZURE_FUNCTION_APP_NAME": {"type": "String", "value": "review-app"},
                }}),
-               "MOCK_FUNCTION_APP": json.dumps({"defaultHostname": "offline.invalid"}),
+               "MOCK_FUNCTION_APP": json.dumps({"properties": {"defaultHostName": "offline.invalid"}}),
                "MOCK_FUNCTIONS": "\n".join(f"review-app/{name}" for name in FUNCTIONS), **overrides}
         environment_args = ["-e", environment] if environment is not None else []
         command = ["bash", *(["-s", "--"] if piped else [str(ROOT / "deploy.sh")]), *environment_args, *args]
@@ -242,8 +242,12 @@ def test_missing_mcp_function_is_a_failed_deployment(deploy):
                                  "offline.invalid\n", "offline.invalid\tother.invalid", "user@offline.invalid",
                                  "-offline.invalid", "offline..invalid", "a" * 64 + ".invalid",
                                  ".".join(["a" * 63] * 4)])
-def test_invalid_function_app_host_stops_before_publish(deploy, host):
-    result, calls = deploy("--skip-infra", "-y", MOCK_FUNCTION_APP=json.dumps({"defaultHostName": host}))
+@pytest.mark.parametrize("nested", [False, True])
+def test_invalid_function_app_host_stops_before_publish(deploy, host, nested):
+    response = {"defaultHostName": host}
+    if nested:
+        response = {"properties": response}
+    result, calls = deploy("--skip-infra", "-y", MOCK_FUNCTION_APP=json.dumps(response))
     assert result.returncode != 0
     assert "主机名" in result.stderr
     assert not any("config-zip" in call or call.startswith("curl ") for call in calls)
@@ -251,10 +255,14 @@ def test_invalid_function_app_host_stops_before_publish(deploy, host):
 
 @pytest.mark.parametrize("key", ["defaultHostName", "defaultHostname", "defaulthostname", "DEFAULTHOSTNAME"])
 @pytest.mark.parametrize("piped", [False, True])
-def test_function_app_host_accepts_key_casing(deploy, key, piped):
+@pytest.mark.parametrize("nested", [False, True])
+def test_function_app_host_accepts_key_casing(deploy, key, piped, nested):
     host = "review-app-123.japaneast-01.azurewebsites.net"
+    response = {key: host}
+    if nested:
+        response = {"name": "review-app", "type": "Microsoft.Web/sites", "properties": response}
     result, calls = deploy("--skip-infra", "-y", piped=piped,
-                           MOCK_FUNCTION_APP=json.dumps({key: host}))
+                           MOCK_FUNCTION_APP=json.dumps(response))
     assert result.returncode == 0, result.stderr
     assert "az functionapp show -g review-group -n review-app -o json" in calls
     probes = [call for call in calls if call.startswith("curl ") and "/archive/" not in call]
@@ -268,7 +276,21 @@ def test_function_app_host_accepts_key_casing(deploy, key, piped):
 @pytest.mark.parametrize("response", ["", "not-json", "null", "[]", "{}",
                                      '{"other":"must-not-log-value"}',
                                      '{"defaultHostName":"offline.invalid",'
-                                     '"defaultHostname":"must-not-log-value"}'])
+                                     '"defaultHostname":"must-not-log-value"}',
+                                     json.dumps({"properties": None}),
+                                     json.dumps({"properties": []}),
+                                     json.dumps({"properties": 123}),
+                                     json.dumps({"properties": "must-not-log-value"}),
+                                     json.dumps({"properties": {}}),
+                                     json.dumps({"properties": {"other": "must-not-log-value"}}),
+                                     json.dumps({"properties": {"defaultHostName": "offline.invalid",
+                                                                "defaultHostname": "must-not-log-value"}}),
+                                     json.dumps({"defaultHostName": "offline.invalid",
+                                                 "properties": {"defaultHostName": "must-not-log-value"}}),
+                                     json.dumps({"defaultHostName": "must-not-log-value",
+                                                 "properties": {"defaultHostName": "must-not-log-value"}}),
+                                     json.dumps({"properties": {"siteConfig": {
+                                         "defaultHostName": "must-not-log-value"}}})])
 def test_invalid_function_app_response_stops_before_publish(deploy, response):
     result, calls = deploy("--skip-infra", "-y", MOCK_FUNCTION_APP=response)
     assert result.returncode != 0

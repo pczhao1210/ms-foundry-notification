@@ -108,7 +108,7 @@ bash deploy.sh
 
 正式部署与 `--what-if` 均保留默认 Provider 检查。部署输出通过 `az deployment sub show` 按 JSON 读取，只有状态为 `Succeeded` 且 `AZURE_RESOURCE_GROUP` / `AZURE_FUNCTION_APP_NAME` 都是有效名称时才查询 Function App、发布代码。输出键按不区分大小写的方式唯一匹配，兼容实际 ARM 返回的 `azurE_RESOURCE_GROUP` / `azurE_FUNCTION_APP_NAME`，不改写资源名称值；若出现多个大小写不同的同名键则报错停止。日志区分部署、读取输出及目标资源；缺失或无效输出时只报告字段名及类型，不打印字段值，不会将 TSV 的 `None` 当作资源名称。向导回车保留显示的默认值。若基础设施已经成功，仅在输出读取阶段失败，可使用更新后的脚本加 `--skip-infra` 在相同订阅和环境下继续，不必重新部署基础设施。
 
-Function App 主机名同样通过 `az functionapp show -o json` 读取，唯一匹配 `defaultHostName` / `defaultHostname` 等大小写变体，并验证为有效 DNS 名称后才发布代码。主机名缺失、空值、字段冲突或读取失败都会停止，不再拼出 `https:///api/...`，也不会根据应用名猜测域名。旧脚本若在函数注册后报告 `Could not resolve host: api`，应先检查主机名读取结果，而非据此判断区域 DNS 故障；使用修复后的脚本加 `--skip-infra` 可重新发布代码并验收，无需重建基础设施。
+Function App 主机名同样通过 `az functionapp show -o json` 读取，兼容 CLI 扁平响应中的顶层字段，以及 ARM 原始响应的 `properties.defaultHostName`。只在顶层与 `properties` 中唯一匹配 `defaultHostName` / `defaultHostname` 等大小写变体，并验证为有效 DNS 名称后才发布代码；不递归搜索其他对象。主机名缺失、空值、跨层重复、大小写冲突或读取失败都会停止，缺失诊断分别列出顶层及 `properties` 的字段名，不打印字段值。不再拼出 `https:///api/...`，也不会根据应用名猜测域名。旧脚本若报告 `Could not resolve host: api`，或实际字段含 `properties` 却报缺少 `defaultHostName`，应先检查响应结构；基础设施部署已成功时，使用修复后的脚本加 `--skip-infra` 可继续发布代码并验收，无需重建基础设施。
 
 `RoleAssignmentUpdateNotPermitted` 表示部署尝试修改现有角色分配的主体、作用域等不可变字段。旧模板的订阅级 Reader 分配 ID 未包含 `principalId`，同名托管身份删除重建后会复用旧 ID。现在改为按订阅、实际 `principalId` 和 Reader 角色生成 ID：同一身份重跑保持不变，新身份使用新分配；不会自动删除旧分配。可在所选订阅中查看具体失败资源，确认是否为该分配：
 
