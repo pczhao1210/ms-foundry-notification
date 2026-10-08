@@ -110,6 +110,17 @@ bash deploy.sh
 
 Function App 主机名同样通过 `az functionapp show -o json` 读取，唯一匹配 `defaultHostName` / `defaultHostname` 等大小写变体，并验证为有效 DNS 名称后才发布代码。主机名缺失、空值、字段冲突或读取失败都会停止，不再拼出 `https:///api/...`，也不会根据应用名猜测域名。旧脚本若在函数注册后报告 `Could not resolve host: api`，应先检查主机名读取结果，而非据此判断区域 DNS 故障；使用修复后的脚本加 `--skip-infra` 可重新发布代码并验收，无需重建基础设施。
 
+`RoleAssignmentUpdateNotPermitted` 表示部署尝试修改现有角色分配的主体、作用域等不可变字段。旧模板的订阅级 Reader 分配 ID 未包含 `principalId`，同名托管身份删除重建后会复用旧 ID。现在改为按订阅、实际 `principalId` 和 Reader 角色生成 ID：同一身份重跑保持不变，新身份使用新分配；不会自动删除旧分配。可在所选订阅中查看具体失败资源，确认是否为该分配：
+
+```bash
+az deployment operation sub list --name foundry-notify-foundry-notify \
+  --query "[?properties.provisioningState=='Failed'].{resource:properties.targetResource.id,error:properties.statusMessage}" -o json
+```
+
+从旧模板迁移时，如果**当前同一身份**已经拥有订阅级 Reader，新命名可能报 `RoleAssignmentExists`。确认现有分配的 `principalId`、订阅作用域和 Reader 角色均一致后，可设置 `AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME` 为该分配的 **name（GUID，不是完整资源 ID）**；azd 用户在 `infra/main.parameters.json` 的 `subscriptionReaderAssignmentName.value` 填入同一 GUID。新建环境或身份已重建时保留空值，不得填入属于旧身份的冲突分配 ID。后续部署需保留所选的复用参数，不要批量删除订阅角色分配。
+
+若基础设施失败已将同名部署记录置为 `Failed`，需用修复后的模板、相同订阅/环境/区域/资源组/前缀重新完成基础设施，再发布代码；此时不能直接使用要求部署状态为 `Succeeded` 的 `--skip-infra`。
+
 > `raw.githubusercontent.com` 有约 5 分钟缓存，刚推送的更改可能稍后才生效；需要精确版本时用 `-r <commit>`。
 
 所需权限：订阅级 **Owner**，或 Contributor + User Access Administrator（需为托管身份分配订阅级 Reader）。

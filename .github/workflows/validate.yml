@@ -31,12 +31,12 @@ jobs:
         run: python -m pip install -r src/requirements.txt -r requirements-dev.txt
       - name: Verify dependency consistency
         run: python -m pip check
+      - name: Install Bicep compiler
+        run: az bicep install --version v0.48.1
       - name: Run offline tests
         run: python -m pytest -q
       - name: Validate deployment script
         run: bash -n deploy.sh
-      - name: Install Bicep compiler
-        run: az bicep install --version v0.48.1
       - name: Compile infrastructure
         run: az bicep build --file infra/main.bicep --stdout > /dev/null
       - name: Check whitespace

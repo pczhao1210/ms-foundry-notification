@@ -3,6 +3,7 @@ import json
 import os
 import pty
 import select
+import shutil
 import subprocess
 import termios
 import time
@@ -74,6 +75,7 @@ fi
                "MOCK_SOURCE_ROOT": str(ROOT),
                "AZURE_SUBSCRIPTION_ID": "", "AZURE_LOCATION": "eastus2",
                "AZURE_ENV_NAME": "", "AZURE_RESOURCE_GROUP": "", "AZURE_RESOURCE_NAME_PREFIX": "",
+               "AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME": "",
                "MOCK_SUBSCRIPTIONS": '[{"name":"Offline review","id":"offline-review"}]',
                "MOCK_DEPLOYMENT_OUTPUTS": json.dumps({"state": "Succeeded", "outputs": {
                    "AZURE_RESOURCE_GROUP": {"type": "String", "value": "review-group"},
@@ -163,7 +165,52 @@ def test_subscription_deployment_keeps_provider_validation(deploy):
     deployment = next(call for call in calls if call.startswith("az deployment sub create"))
     assert "--validation-level" not in deployment
     assert "resourceGroupName=rg-review" in deployment
+    assert "subscriptionReaderAssignmentName=" in deployment.split()
     assert not any(call.startswith("az group create") for call in calls)
+
+
+@pytest.mark.parametrize("args", [("--what-if",), ("--skip-code", "-y")])
+def test_existing_subscription_reader_assignment_is_forwarded(deploy, args):
+    assignment_name = "11111111-1111-1111-1111-111111111111"
+    result, calls = deploy(*args, AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME=assignment_name)
+    assert result.returncode == 0, result.stderr
+    deployment = next(call for call in calls if call.startswith(("az deployment sub create",
+                                                                "az deployment sub what-if")))
+    assert f"subscriptionReaderAssignmentName={assignment_name}" in deployment.split()
+    assert not any(call.startswith("az role assignment delete") for call in calls)
+
+
+def test_subscription_reader_assignment_template_tracks_principal():
+    compiler = Path(shutil.which("bicep") or Path.home() / ".azure" / "bin" / "bicep")
+    if not compiler.is_file():
+        pytest.skip("Bicep compiler is required for the offline infrastructure contract test")
+    result = subprocess.run([str(compiler), "build", str(ROOT / "infra/main.bicep"), "--stdout"],
+                            env={**os.environ, "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1"},
+                            text=True, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    template = json.loads(result.stdout)
+    reader = next(resource for resource in template["resources"]
+                  if resource["name"] == "[format('subscription-reader-{0}', variables('resourceSuffix'))]")
+    params = reader["properties"]["parameters"]
+    assert "'identity'" in params["identityPrincipalId"]["value"]
+    assert params["identityPrincipalId"]["value"].endswith(".outputs.principalId.value]")
+    assert params["existingAssignmentName"]["value"] == "[parameters('subscriptionReaderAssignmentName')]"
+    assert template["parameters"]["subscriptionReaderAssignmentName"]["defaultValue"] == ""
+    nested = reader["properties"]["template"]
+    assert "subscriptionDeploymentTemplate" in nested["$schema"]
+    assert nested["variables"]["readerRoleId"] == "acdd72a7-3385-48ef-bd42-f606fba81ae7"
+    assignment, = nested["resources"]
+    assert assignment["type"] == "Microsoft.Authorization/roleAssignments"
+    assert assignment["name"] == (
+        "[if(empty(parameters('existingAssignmentName')), "
+        "guid(subscription().id, parameters('identityPrincipalId'), variables('readerRoleId')), "
+        "parameters('existingAssignmentName'))]"
+    )
+    assert assignment["properties"]["principalId"] == "[parameters('identityPrincipalId')]"
+    assert assignment["properties"]["principalType"] == "ServicePrincipal"
+    assert assignment["properties"]["roleDefinitionId"] == (
+        "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('readerRoleId'))]"
+    )
 
 
 def test_what_if_keeps_provider_validation(deploy):

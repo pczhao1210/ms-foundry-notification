@@ -165,7 +165,7 @@ VS Code 客户端配置示例见 README。
 azure.yaml
 .github/workflows/validate.yml               # Python 3.12 离线测试、依赖检查、脚本语法、Bicep 编译；无部署权限
 deploy.sh                                   # Cloud Shell 部署脚本（az + python3），与 azd 共用 infra/
-infra/ main.bicep, main.parameters.json, modules/{functionapp,storage,monitoring,identity,rbac}.bicep
+infra/ main.bicep, main.parameters.json, modules/{functionapp,storage,monitoring,identity,rbac,subscription_rbac}.bicep
 src/ function_app.py, host.json, requirements.txt, pipeline.py   # pipeline：每日采集编排
      collectors/{_http.py, arm_models.py, docs_schedule.py, retail_prices.py}   # I/O：重试、分页、nextLink 主机校验
      core/{events.py, normalize.py, diff.py, schedule.py, docs.py, price_parse.py, price_alias.py, store.py, query.py, config.py}
@@ -199,7 +199,8 @@ Bicep 契约（两种方式都依赖，修改时须同步）：
 - 参数：`environmentName`、`location`（azd 经 `infra/main.parameters.json` 映射 `${AZURE_ENV_NAME}`/`${AZURE_LOCATION}`）
 - 输出：`AZURE_RESOURCE_GROUP`、`AZURE_FUNCTION_APP_NAME`（另有 `AZURE_FUNCTION_APP_HOST`、`STORAGE_BLOB_ENDPOINT`、`STORAGE_TABLE_ENDPOINT` 供本地开发）
 - 可选参数：`principalId`（azd 映射 `${AZURE_PRINCIPAL_ID}`）、`maximumInstanceCount`（默认 40）、`instanceMemoryMB`（默认 2048）、`enableCollectionAlerts`（默认 false）、`alertActionGroupIds`（默认 []）
-- 可选命名参数：`resourceGroupName`（默认空，使用 `rg-<environmentName>`）、`resourceNamePrefix`（默认空，保留旧命名）、`resourceGroupLocation`（默认 `location`，脚本选择已有组时读取其所在地，避免修改不可变的资源组所在地）。azd 无需新增必填参数，默认命名保持兼容。自定义前缀加在各资源类型前缀和唯一 token 之间；存储账户前缀去掉连字符并截取前 9 位，保留完整 token，长度不超过 24。自定义组名参与 token 计算；订阅 Reader 分配 ID 随自定义组/前缀变化，避免替换托管身份时修改不可变的角色分配。
+- 可选命名参数：`resourceGroupName`（默认空，使用 `rg-<environmentName>`）、`resourceNamePrefix`（默认空，保留旧命名）、`resourceGroupLocation`（默认 `location`，脚本选择已有组时读取其所在地，避免修改不可变的资源组所在地）。azd 无需新增必填参数，资源默认命名保持兼容。自定义前缀加在各资源类型前缀和唯一 token 之间；存储账户前缀去掉连字符并截取前 9 位，保留完整 token，长度不超过 24。自定义组名参与 token 计算；订阅 Reader 分配 ID 包含实际托管身份 `principalId`，覆盖同名身份重建场景。
+- 可选迁移参数：`subscriptionReaderAssignmentName`（默认空），仅用于复用同一订阅、同一实际主体、同一 Reader 角色的已有分配 GUID。`deploy.sh` 通过 `AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME` 传入；azd 通过 `infra/main.parameters.json` 设置。不是完整资源 ID，也不得用于复用属于旧主体的冲突分配。
 - Flex 部署存储使用托管身份认证（`functionAppConfig.deployment.storage.authentication`），不依赖共享密钥
 
 部署向导（2026-10-08）：不带参数可运行，环境名默认 `foundry-notify`。未通过 `-s/--subscription` 或 `AZURE_SUBSCRIPTION_ID` 指定订阅时，先获取 Enabled 订阅列表；多个订阅时显示名称和 ID，从 `/dev/tty` 读取编号、名称或 ID，默认当前订阅；只有一个时自动使用，无可用订阅则退出。通过 `az account set` 切换后，从 `/dev/tty` 按顺序询问 region（支持 Flex 的区域编号或名称，默认 `eastus2`）、资源组（所选订阅的已有组编号/名称或新名称，默认 `rg-<env>`）、资源名称前缀（默认环境名）；回车保留参数/环境变量/默认值，确认后部署。命令行可用 `-g/--resource-group`、`--resource-prefix`，对应 `AZURE_RESOURCE_GROUP`、`AZURE_RESOURCE_NAME_PREFIX`；`-y` 与 `--what-if` 跳过订阅选择及部署向导，使用指定订阅或当前订阅且默认保留旧版哈希命名。`--skip-infra` 仍按需选择订阅，但不询问命名选项，直接读取所选订阅内同名环境的部署输出。更改组名或前缀会创建新资源，不迁移数据；重复部署须沿用相同配置，预览自定义配置需显式传入对应参数。
@@ -209,6 +210,8 @@ Bicep 契约（两种方式都依赖，修改时须同步）：
 部署输出校验（2026-10-08）：正式部署与预览均使用默认 Provider 检查，资源组仍由 Bicep 管理，不提前执行 `az group create`。已确认此次故障由输出键大小写差异触发：状态为 `Succeeded`，原始 ARM GET 返回 `azurE_RESOURCE_GROUP` / `azurE_FUNCTION_APP_NAME`，值均有效；全大写精确查找错误地判定字段缺失，旧 TSV 查询又把 null 转成 `None` 并当作资源名使用。不是向导回车丢失默认值；`--validation-level Template` 与切换 `az rest` 均不是所需修复，已撤销。`read_outputs` 保留 `az deployment sub show` 的 JSON 查询，读取 `properties.provisioningState` 和 `properties.outputs`，要求状态为 `Succeeded`；对两个必需输出键按 `casefold()` 唯一匹配，零匹配或多个大小写同名匹配均报错，不改写资源名称值。值须为非空且不含空白的字符串，拒绝 JSON null、缺失字段以及字面量 `None` / `null`。失败诊断只报告字段名及类型，不打印字段值，不查询 Function App、不发布代码；读取 CLI 的错误不隐藏。离线测试覆盖本地脚本与管道输入下的回车默认值、全大写/实际混合大小写/小写输出、大小写冲突、读取失败、无效输出、未成功部署及诊断不泄露值。基础设施成功后可通过 `--skip-infra` 在同一订阅与环境重试发布。Bicep 的全大写输出契约及 azd 调用方式不变；造成服务端键名大小写变化的具体环节未进一步归因。
 
 Function App 主机名校验（2026-10-08）：旧 `--query defaultHostName -o tsv` 返回空值时，验收 URL 会变成 `https:///api/...`，curl 将 `api` 作为主机名解析。`read_outputs` 改为读取 `az functionapp show -o json`，对 `defaultHostName` / `defaultHostname` 等字段大小写变体进行 `casefold()` 唯一匹配；值必须是至少两段的 DNS 名称，每段 1-63 个 ASCII 字母/数字/连字符且首尾为字母或数字，总长不超过 253。缺失、冲突、非字符串、空值、非法 DNS 名称及 CLI 读取失败均在发布与验收前停止，诊断不打印无效字段值；有效主机名记录到日志，REST/MCP 探测与最终摘要共用该值，不根据应用名拼接或猜测域名。离线测试覆盖字段大小写、完整 URL、无效响应、读取失败、本地与管道执行；云端实际返回的字段拼写仍需现场确认，单元测试不访问 Azure。验收仍要求全部 13 个函数注册，REST/MCP 无 key 均返回 401。
+
+订阅 Reader 幂等性（2026-10-08）：角色分配的主体与作用域不可更新。旧分配 ID 只依赖环境/区域/组名/资源前缀，未包含实际主体；同名 UAMI 重建后 `principalId` 改变，仍更新旧分配会触发 `RoleAssignmentUpdateNotPermitted`。Reader 改放入 `targetScope = subscription` 的 `subscription_rbac.bicep` 模块，接收身份模块的 `principalId`，默认使用 `guid(subscription().id, identityPrincipalId, readerRoleId)`；模块边界使身份创建后的输出可作为内部资源名的计算输入。模块部署名带资源后缀，避免不同环境共用订阅级部署名。相同主体重跑确定性不变，新主体获得新 ID，不删除旧授权。已有成功部署迁移时，同一主体/作用域/角色的重复授权可能触发 `RoleAssignmentExists`，须确认匹配后显式设置上述复用参数，并在后续部署保留该值；不自动寻找或删除分配。存储/监控已有的 principal-based 命名不变，权限仍仅为订阅 Reader。离线测试编译并解析 ARM JSON，断言身份输出传递、分配 GUID 输入、Reader 权限及复用参数；CI 在 pytest 前安装固定版本 Bicep，本地缺少编译器时仅跳过该编译契约测试。云端具体冲突仍需 deployment operations 确认；失败记录未恢复为 `Succeeded` 前，不能依靠 `--skip-infra` 跳过本次基础设施故障。
 
 采集告警（显式启用）：建议首次采集成功后设置 `enableCollectionAlerts=true`；脚本支持 `--enable-alerts`（不能与 `--skip-infra` 同用），azd 可在 `infra/main.parameters.json` 中设置布尔值。每小时查询专用 Log Analytics workspace 的 AppRequests，最近一次 daily_collect 失败或 32 小时内没有完成调用时触发 severity 2 告警；成功后自动恢复。Request 遥测未采样，窗口 48 小时。规则可能产生 Azure Monitor 费用，默认不创建；通知需在门户配置 Action Group 或通过 `alertActionGroupIds` 指定已有组，无接收组时只生成告警记录。云端须验证实际遥测表、函数名称及通知投递。
 

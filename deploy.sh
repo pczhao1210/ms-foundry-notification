@@ -10,6 +10,7 @@ LOCATION="${AZURE_LOCATION:-eastus2}"
 SUBSCRIPTION="${AZURE_SUBSCRIPTION_ID:-}"
 RESOURCE_GROUP_NAME="${AZURE_RESOURCE_GROUP:-}"
 RESOURCE_PREFIX="${AZURE_RESOURCE_NAME_PREFIX:-}"
+SUBSCRIPTION_READER_ASSIGNMENT_NAME="${AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME:-}"
 REF=""
 WHAT_IF=false
 SKIP_INFRA=false
@@ -42,6 +43,8 @@ usage() {
 
 所需权限：订阅级 Owner，或 Contributor + User Access Administrator / RBAC Administrator
 （Bicep 会在订阅级给托管身份分配 Reader，用于读取 Models API）。
+迁移已有 Reader 分配可设置 AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME 为其 GUID，
+仅可复用属于同一托管身份、同一订阅和 Reader 角色的分配；默认留空。
 EOF
 }
 
@@ -214,6 +217,7 @@ deploy_infra() {
   local args=(--name "$DEPLOYMENT_NAME" --location "$LOCATION" --template-file "$BICEP_FILE"
               --parameters environmentName="$ENV_NAME" location="$LOCATION" enableCollectionAlerts="$ENABLE_ALERTS"
               resourceGroupName="$RESOURCE_GROUP_NAME" resourceNamePrefix="$RESOURCE_PREFIX"
+              subscriptionReaderAssignmentName="$SUBSCRIPTION_READER_ASSIGNMENT_NAME"
               resourceGroupLocation="${group_location:-$LOCATION}")
   if $WHAT_IF; then
     log "预览基础设施变更 (what-if) ..."

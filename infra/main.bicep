@@ -23,6 +23,9 @@ param resourceNamePrefix string = ''
 @description('Optional user object ID granted Blob/Table data access for local development.')
 param principalId string = ''
 
+@description('Optional existing subscription Reader assignment GUID for this managed identity; leave empty for principal-based naming.')
+param subscriptionReaderAssignmentName string = ''
+
 @description('Opt in to an hourly collection health alert after the first successful run; Azure Monitor charges may apply.')
 param enableCollectionAlerts bool = false
 
@@ -41,7 +44,6 @@ var resourceToken = empty(resourceGroupName) || resourceGroupName == 'rg-${envir
   ? toLower(uniqueString(subscription().id, environmentName, location))
   : toLower(uniqueString(subscription().id, environmentName, location, resourceGroupName))
 var resourceSuffix = empty(resourceNamePrefix) ? resourceToken : '${resourceNamePrefix}-${resourceToken}'
-var readerRoleId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
 
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: empty(resourceGroupName) ? 'rg-${environmentName}' : resourceGroupName
@@ -93,15 +95,11 @@ module rbac 'modules/rbac.bicep' = {
   }
 }
 
-// The collector lists models in every region of this subscription.
-resource subscriptionReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: empty(resourceNamePrefix) && rg.name == 'rg-${environmentName}'
-    ? guid(subscription().id, environmentName, location, readerRoleId)
-    : guid(subscription().id, rg.name, resourceSuffix, readerRoleId)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', readerRoleId)
-    principalId: identity.outputs.principalId
-    principalType: 'ServicePrincipal'
+module subscriptionReader 'modules/subscription_rbac.bicep' = {
+  name: 'subscription-reader-${resourceSuffix}'
+  params: {
+    identityPrincipalId: identity.outputs.principalId
+    existingAssignmentName: subscriptionReaderAssignmentName
   }
 }
 

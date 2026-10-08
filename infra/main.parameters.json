@@ -11,6 +11,9 @@
     "principalId": {
       "value": "${AZURE_PRINCIPAL_ID}"
     },
+    "subscriptionReaderAssignmentName": {
+      "value": ""
+    },
     "enableCollectionAlerts": {
       "value": false
     },
