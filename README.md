@@ -106,7 +106,7 @@ bash deploy.sh
 
 脚本只依赖 `az`、`python3`、`curl`（Cloud Shell 均已内置）：选择部署选项 → 获取源码 → 订阅级 Bicep 部署 → 打包 `src/` → `az functionapp deployment source config-zip --build-remote true`（Flex Consumption 远程构建）→ 确认完整 13 个函数注册，REST/MCP 无 key 请求均返回 401 → 输出端点与取 key 命令（不打印密钥值）。验收失败会非零退出；仍需在本人终端使用调用方密钥验证实际 REST/MCP 查询。`--what-if` 不注册资源提供程序或部署资源。相同配置可重复执行（幂等）。通过管道运行时向导与部署确认均从 `/dev/tty` 读取；无终端（如 CI）时请加 `-y`。
 
-正式部署与 `--what-if` 均保留默认 Provider 检查。部署输出按 JSON 读取，只有状态为 `Succeeded` 且 `AZURE_RESOURCE_GROUP` / `AZURE_FUNCTION_APP_NAME` 都是有效名称时才查询 Function App、发布代码。日志会分别标明部署、读取输出及目标资源；缺失输出直接报错，不会将 TSV 的 `None` 当作资源名称。向导回车保留显示的默认值；若旧脚本报 `Resource group 'None' could not be found`，需先检查同名订阅部署的状态与 Outputs，不能据此认定向导丢失了默认值。
+正式部署与 `--what-if` 均保留默认 Provider 检查。部署输出通过 `az deployment sub show` 按 JSON 读取，只有状态为 `Succeeded` 且 `AZURE_RESOURCE_GROUP` / `AZURE_FUNCTION_APP_NAME` 都是有效名称时才查询 Function App、发布代码。输出键按不区分大小写的方式唯一匹配，兼容实际 ARM 返回的 `azurE_RESOURCE_GROUP` / `azurE_FUNCTION_APP_NAME`，不改写资源名称值；若出现多个大小写不同的同名键则报错停止。日志区分部署、读取输出及目标资源；缺失或无效输出时只报告字段名及类型，不打印字段值，不会将 TSV 的 `None` 当作资源名称。向导回车保留显示的默认值。若基础设施已经成功，仅在输出读取阶段失败，可使用更新后的脚本加 `--skip-infra` 在相同订阅和环境下继续，不必重新部署基础设施。
 
 > `raw.githubusercontent.com` 有约 5 分钟缓存，刚推送的更改可能稍后才生效；需要精确版本时用 `-r <commit>`。
 

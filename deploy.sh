@@ -246,11 +246,18 @@ if not isinstance(outputs, dict):
     sys.exit("部署 outputs 缺失或不是 JSON 对象")
 names = []
 for key in ("AZURE_RESOURCE_GROUP", "AZURE_FUNCTION_APP_NAME"):
-    output = outputs.get(key)
+    matches = [output for name, output in outputs.items() if name.casefold() == key.casefold()]
+    if not matches:
+        fields = json.dumps(sorted(outputs), ensure_ascii=False)
+        sys.exit(f"部署输出缺少 {key}；ARM 实际输出字段: {fields}")
+    if len(matches) != 1:
+        sys.exit(f"部署输出 {key} 存在大小写冲突")
+    output = matches[0]
     value = output.get("value") if isinstance(output, dict) else None
     if (not isinstance(value, str) or not value or value in ("None", "null")
             or any(character.isspace() for character in value)):
-        sys.exit(f"部署输出 {key} 缺失或不是有效资源名称")
+        fields = json.dumps(sorted(output), ensure_ascii=False) if isinstance(output, dict) else "[]"
+        sys.exit(f"部署输出 {key} 不是有效资源名称；项目字段: {fields}，value 类型: {type(value).__name__}")
     names.append(value)
 print("\t".join(names))
 ' <<<"$outputs")" || die "部署输出无效，已停止发布；请检查部署 ${DEPLOYMENT_NAME} 的状态与 Outputs"

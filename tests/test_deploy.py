@@ -35,7 +35,12 @@ case "$*" in
   'provider register'*) exit 0 ;;
   'functionapp list-flexconsumption-locations'*) printf '1\\n' ;;
   'deployment sub what-if'*) exit 0 ;;
-    'deployment sub show'*) printf '%s\\n' "$MOCK_DEPLOYMENT_OUTPUTS" ;;
+    'deployment sub show'*)
+        if [[ -n "${MOCK_DEPLOYMENT_READ_ERROR:-}" ]]; then
+            printf '%s\\n' "$MOCK_DEPLOYMENT_READ_ERROR" >&2
+            exit 1
+        fi
+        printf '%s\\n' "$MOCK_DEPLOYMENT_OUTPUTS" ;;
   'functionapp show'*) printf 'offline.invalid\\n' ;;
   'functionapp deployment source config-zip'*) exit 0 ;;
   'functionapp function list'*) printf '%s\\n' "$MOCK_FUNCTIONS" ;;
@@ -279,14 +284,71 @@ def test_unsuccessful_deployment_stops_before_function_lookup(deploy, state):
     assert not any(call.startswith("az functionapp") for call in calls)
 
 
-def test_deployment_outputs_are_read_as_json(deploy):
-    result, calls = deploy("--skip-infra", "-y")
+@pytest.mark.parametrize("group_key, app_key", [
+    ("AZURE_RESOURCE_GROUP", "AZURE_FUNCTION_APP_NAME"),
+    ("azurE_RESOURCE_GROUP", "azurE_FUNCTION_APP_NAME"),
+    ("azure_resource_group", "azure_function_app_name"),
+])
+def test_deployment_outputs_accept_key_casing(deploy, group_key, app_key):
+    response = {"state": "Succeeded", "outputs": {
+        group_key: {"type": "String", "value": "review-group"},
+        app_key: {"type": "String", "value": "review-app"},
+        "storagE_BLOB_ENDPOINT": {"type": "String", "value": "https://offline.invalid/"},
+    }}
+    result, calls = deploy("--skip-infra", "-y", MOCK_DEPLOYMENT_OUTPUTS=json.dumps(response))
     assert result.returncode == 0, result.stderr
     outputs = next(call for call in calls if call.startswith("az deployment sub show"))
+    assert "--name foundry-notify-review" in outputs
     assert "-o json" in outputs
     assert "outputs:properties.outputs" in outputs
     assert "资源组=review-group   Function App=review-app" in result.stdout
     assert "az functionapp show -g review-group -n review-app --query defaultHostName -o tsv" in calls
+    assert any("config-zip -g review-group -n review-app" in call for call in calls)
+
+
+@pytest.mark.parametrize("key", ["AZURE_RESOURCE_GROUP", "AZURE_FUNCTION_APP_NAME"])
+def test_deployment_outputs_reject_case_collisions(deploy, key):
+    response = {"state": "Succeeded", "outputs": {
+        "AZURE_RESOURCE_GROUP": {"type": "String", "value": "review-group"},
+        "AZURE_FUNCTION_APP_NAME": {"type": "String", "value": "review-app"},
+        key.lower(): {"type": "String", "value": "must-not-log-value"},
+    }}
+    result, calls = deploy("--skip-infra", "-y", MOCK_DEPLOYMENT_OUTPUTS=json.dumps(response))
+    assert result.returncode != 0
+    assert f"部署输出 {key} 存在大小写冲突" in result.stderr
+    assert "must-not-log-value" not in result.stdout + result.stderr
+    assert not any(call.startswith("az functionapp") for call in calls)
+
+
+def test_missing_output_reports_field_names_without_values(deploy):
+    outputs = {"state": "Succeeded", "outputs": {
+        "unexpectedOutput": {"type": "String", "value": "must-not-log-value"},
+    }}
+    result, calls = deploy("--skip-infra", "-y", MOCK_DEPLOYMENT_OUTPUTS=json.dumps(outputs))
+    assert result.returncode != 0
+    assert 'ARM 实际输出字段: ["unexpectedOutput"]' in result.stderr
+    assert "must-not-log-value" not in result.stdout + result.stderr
+    assert not any(call.startswith("az functionapp") for call in calls)
+
+
+def test_deployment_read_failure_preserves_error_and_stops_before_publish(deploy):
+    result, calls = deploy("--skip-infra", "-y", MOCK_DEPLOYMENT_READ_ERROR="AuthorizationFailed: offline denial")
+    assert result.returncode != 0
+    assert "AuthorizationFailed: offline denial" in result.stderr
+    assert "无法读取部署" in result.stderr
+    assert not any(call.startswith("az functionapp") for call in calls)
+
+
+def test_invalid_output_reports_structure_without_values(deploy):
+    outputs = {"state": "Succeeded", "outputs": {
+        "AZURE_RESOURCE_GROUP": {"type": "String", "unexpectedValue": "must-not-log-value"},
+    }}
+    result, calls = deploy("--skip-infra", "-y", MOCK_DEPLOYMENT_OUTPUTS=json.dumps(outputs))
+    assert result.returncode != 0
+    assert '项目字段: ["type", "unexpectedValue"]' in result.stderr
+    assert "value 类型: NoneType" in result.stderr
+    assert "must-not-log-value" not in result.stdout + result.stderr
+    assert not any(call.startswith("az functionapp") for call in calls)
 
 
 def test_cancelled_wizard_does_not_deploy(deploy):
