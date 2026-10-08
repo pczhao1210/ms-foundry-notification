@@ -12,7 +12,7 @@ from typing import Any
 import azure.functions as func
 
 from api import service
-from core.query import DEFAULT_DAYS, MAX_DAYS
+from core.query import DEFAULT_DAYS, DEFAULT_LIMIT, DEFAULT_RESPONSE_BYTES, MAX_DAYS, MAX_LIMIT
 
 bp = func.Blueprint()
 log = logging.getLogger(__name__)
@@ -24,7 +24,13 @@ _TERMS = (
     "(GA/Preview/Legacy/Deprecated/Retired); source=retail_prices events are list-price changes."
 )
 _TIME = "Timestamps are UTC ISO 8601; event `date` and day windows use Asia/Shanghai calendar days."
-_LIMITS = "At most 200 events are returned; `truncated`=true means filters should be narrowed."
+_LIMITS = (
+    "Default 200 events per page. Pass next_cursor as cursor with the same filters to read the next page; "
+    "next_cursor=null marks the end. If the cursor expires after a data update or date change, restart without it."
+    " Default response budget is 65536 UTF-8 bytes. Large price events can span pages: concatenate changes by "
+    "event id and changes_offset until changes_total is reached; do not discard repeated event ids. "
+    "collection.complete=false means one or more sources are missing, stale, running or failed, not no changes."
+)
 _PRICES = "Token prices are USD per 1M tokens (retail list price, Anthropic/Marketplace models not included)."
 
 
@@ -40,6 +46,9 @@ _BILLING = _prop(
     "'provisioned' (*ProvisionedManaged / PTU).",
 )
 _DAYS = _prop("days", "integer", f"Window length in days, 1-{MAX_DAYS}. Default {DEFAULT_DAYS}.")
+_LIMIT = _prop("limit", "integer", f"Events per page, 1-{MAX_LIMIT}. Default {DEFAULT_LIMIT}.")
+_CURSOR = _prop("cursor", "string", "Optional next_cursor from the previous page; keep the same filters.")
+_MAX_BYTES = _prop("max_bytes", "integer", "Response budget in UTF-8 bytes, 16384-1048576; default 65536.")
 
 
 def _properties(*props: Mapping[str, Any]) -> str:
@@ -60,16 +69,27 @@ def _text(args: Mapping[str, Any], name: str) -> str | None:
 
 
 def _days(args: Mapping[str, Any]) -> int:
-    value = args.get("days")
+    return _integer(args, "days", DEFAULT_DAYS)
+
+
+def _integer(args: Mapping[str, Any], name: str, default: int) -> int:
+    value = args.get(name)
     if value is None or value == "":
-        return DEFAULT_DAYS
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
     try:
         number = float(value)
     except (TypeError, ValueError):
-        raise ValueError("days must be an integer") from None
+        raise ValueError(f"{name} must be an integer") from None
     if not number.is_integer():
-        raise ValueError("days must be an integer")
+        raise ValueError(f"{name} must be an integer")
     return int(number)
+
+
+def _page(args: Mapping[str, Any]) -> dict[str, Any]:
+    return {"limit": _integer(args, "limit", DEFAULT_LIMIT), "cursor": _text(args, "cursor"),
+            "max_bytes": _integer(args, "max_bytes", DEFAULT_RESPONSE_BYTES)}
 
 
 def _run(context: Any, call: Callable[[dict[str, Any]], Any]) -> str:
@@ -91,12 +111,12 @@ def _run(context: Any, call: Callable[[dict[str, Any]], Any]) -> str:
         "versions, Preview->GA, deprecation, retirement date changes, removals), retirements/auto-upgrades scheduled "
         f"for today, and retail price changes. Grouped by model. {_TERMS} {_TIME} {_LIMITS}"
     ),
-    tool_properties=_properties(_CATEGORY, _BILLING),
+    tool_properties=_properties(_CATEGORY, _BILLING, _LIMIT, _CURSOR, _MAX_BYTES),
 )
 def mcp_get_today_changes(context) -> str:
     return _run(
         context,
-        lambda a: service.changes("today", category=_text(a, "category"), billing=_text(a, "billing")),
+        lambda a: service.changes("today", category=_text(a, "category"), billing=_text(a, "billing"), **_page(a)),
     )
 
 
@@ -107,12 +127,12 @@ def mcp_get_today_changes(context) -> str:
         "Planned Microsoft Foundry model changes in the next N days, starting tomorrow (Asia/Shanghai): "
         "retirements (field inference/fine_tune), SKU deprecations and auto-upgrade start dates, from the ARM "
         "catalog (source=arm) and the official retirement schedule page when it adds dates ARM lacks "
-        f"(source=docs). {_TERMS} {_TIME} {_LIMITS}"
+        f"(source=docs), plus announced future retail prices when provided (source=retail_prices). {_TERMS} {_TIME} {_LIMITS}"
     ),
-    tool_properties=_properties(_DAYS, _BILLING),
+    tool_properties=_properties(_DAYS, _BILLING, _LIMIT, _CURSOR, _MAX_BYTES),
 )
 def mcp_get_upcoming_changes(context) -> str:
-    return _run(context, lambda a: service.changes("upcoming", days=_days(a), billing=_text(a, "billing")))
+    return _run(context, lambda a: service.changes("upcoming", days=_days(a), billing=_text(a, "billing"), **_page(a)))
 
 
 @bp.mcp_tool_trigger(
@@ -123,13 +143,13 @@ def mcp_get_upcoming_changes(context) -> str:
         "changes, scheduled retirements whose date has passed, and retail price changes. Every change is listed "
         f"(not netted). {_TERMS} {_TIME} {_LIMITS} {_PRICES}"
     ),
-    tool_properties=_properties(_DAYS, _CATEGORY, _BILLING),
+    tool_properties=_properties(_DAYS, _CATEGORY, _BILLING, _LIMIT, _CURSOR, _MAX_BYTES),
 )
 def mcp_get_past_changes(context) -> str:
     return _run(
         context,
         lambda a: service.changes(
-            "past", days=_days(a), category=_text(a, "category"), billing=_text(a, "billing")
+            "past", days=_days(a), category=_text(a, "category"), billing=_text(a, "billing"), **_page(a)
         ),
     )
 

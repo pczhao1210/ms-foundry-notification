@@ -9,6 +9,7 @@ from core import config, query
 from core import events as ev
 
 SNAPSHOT_TTL_SECONDS = 600
+STATUS_TTL_SECONDS = 15
 
 
 class NotReady(RuntimeError):
@@ -18,6 +19,7 @@ class NotReady(RuntimeError):
 _lock = threading.Lock()
 _store: Any = None
 _snapshots: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_statuses: dict[str, tuple[float, dict[str, Any] | None]] = {}
 
 
 def _get_store() -> Any:
@@ -43,21 +45,45 @@ def _snapshot(kind: str) -> dict[str, Any]:
     return data
 
 
+def _health(kinds: tuple[str, ...], served_at: dict[str, str] | None = None) -> dict[str, Any]:
+    now = time.monotonic()
+    statuses = {}
+    for kind in kinds:
+        cached = _statuses.get(kind)
+        if not cached or cached[0] <= now:
+            cached = (now + STATUS_TTL_SECONDS, _get_store().source_status(kind))
+            _statuses[kind] = cached
+        statuses[kind] = cached[1]
+    return query.collection_health(statuses, today=ev.local_today(), served_at=served_at)
+
+
 def changes(
-    scope: str, *, days: int = query.DEFAULT_DAYS, category: str | None = None, billing: str | None = None
+    scope: str, *, days: int = query.DEFAULT_DAYS, category: str | None = None, billing: str | None = None,
+    limit: int = query.DEFAULT_LIMIT, cursor: str | None = None,
+    max_bytes: int = query.DEFAULT_RESPONSE_BYTES,
 ) -> dict[str, Any]:
     today = ev.local_today()
     start, end = query.date_window(scope, today, days)
-    events = _get_store().read_events(start, end)
-    return query.query_changes(events, scope=scope, today=today, days=days, category=category, billing=billing)
+    events = _get_store().read_events(start, end, category=category, scheduled_only=scope == "upcoming")
+    result = query.query_changes(events, scope=scope, today=today, days=days, category=category, billing=billing,
+                                 limit=limit, cursor=cursor, max_bytes=max_bytes)
+    kinds = ("prices",) if category == "price" else ("arm", "docs") if category == "lifecycle" else ("arm", "docs", "prices")
+    result["collection"] = _health(kinds)
+    if query.response_size(result) > max_bytes:
+        raise ValueError("collection metadata exceeds max_bytes; increase max_bytes")
+    return result
 
 
 def models(**filters: Any) -> dict[str, Any]:
-    return query.search_models(_snapshot("arm"), **filters)
+    result = query.search_models(_snapshot("arm"), **filters)
+    result["collection"] = _health(("arm",), {"arm": result["collected_at"]})
+    return result
 
 
 def model(**filters: Any) -> dict[str, Any]:
-    return query.get_model(_snapshot("arm"), **filters)
+    result = query.get_model(_snapshot("arm"), **filters)
+    result["collection"] = _health(("arm",), {"arm": result["collected_at"]})
+    return result
 
 
 def prices(**filters: Any) -> dict[str, Any]:
@@ -65,4 +91,6 @@ def prices(**filters: Any) -> dict[str, Any]:
         arm = _snapshot("arm")
     except NotReady:
         arm = None
-    return query.get_prices(_snapshot("prices"), arm, **filters)
+    result = query.get_prices(_snapshot("prices"), arm, **filters)
+    result["collection"] = _health(("prices",), {"prices": result["collected_at"]})
+    return result

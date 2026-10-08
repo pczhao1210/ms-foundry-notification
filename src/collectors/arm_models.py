@@ -59,7 +59,9 @@ class ArmModelsCollector:
             if not url:
                 return items
             page = self._get(http, url)
-            items.extend(page.get("value", []))
+            if not isinstance(page, dict) or not isinstance(page.get("value"), list):
+                raise ValueError(f"invalid Models API page for region {region}")
+            items.extend(page["value"])
             url = page.get("nextLink")
         raise RuntimeError(f"too many pages for region {region}")
 

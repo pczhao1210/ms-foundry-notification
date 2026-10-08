@@ -1,6 +1,8 @@
 """Queries shared by the REST endpoints and MCP tools: change windows plus model/price catalog lookups."""
 from __future__ import annotations
 
+import base64
+import json
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -14,6 +16,10 @@ MAX_DAYS = 30
 DEFAULT_DAYS = 7
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 1000
+DEFAULT_RESPONSE_BYTES = 65_536
+MIN_RESPONSE_BYTES = 16_384
+MAX_RESPONSE_BYTES = 1_048_576
+_METADATA_RESERVE_BYTES = 8192
 STATUSES = ("Preview", "GenerallyAvailable", "Legacy", "Deprecating", "Deprecated")
 DEPLOYMENTS = ("global", "datazone", "regional")
 SCOPES = ("today", "past", "upcoming")
@@ -28,6 +34,30 @@ _STATUS_CHANGES = frozenset({ev.STATUS_CHANGED, ev.SKU_STATUS_CHANGED})
 _SUBJECT_FIELDS = ("model", "price_model", "meter")
 # Status meaning "no longer callable" per source: ARM `Deprecated`, docs `Retired`.
 _RETIRED_STATUS = {"arm": "Deprecated", "docs": "Retired"}
+
+
+def collection_health(
+    statuses: Mapping[str, Mapping[str, Any] | None], *, today: str, served_at: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    sources = {}
+    for name, saved in statuses.items():
+        saved = saved or {}
+        snapshot_at = (served_at or {}).get(name, saved.get("snapshot_at"))
+        stale = not snapshot_at or ev.local_date(snapshot_at) != today or snapshot_at != saved.get("snapshot_at")
+        state = saved.get("status", "unknown")
+        if state == "complete" and stale:
+            state = "stale"
+        sources[name] = {
+            "status": state,
+            "snapshot_at": snapshot_at,
+            "last_attempt_at": saved.get("last_attempt_at"),
+            "last_success_at": saved.get("last_success_at"),
+            "stale_regions": saved.get("stale_regions", []),
+            "failed_regions": saved.get("failed_regions", []),
+        }
+    return {"date": today, "timezone": ev.LOCAL_TZ_NAME,
+            "complete": bool(sources) and all(source["status"] == "complete" for source in sources.values()),
+            "sources": sources}
 
 
 def date_window(scope: str, today: str, days: int = DEFAULT_DAYS) -> tuple[str, str]:
@@ -52,12 +82,16 @@ def query_changes(
     category: str | None = None,
     billing: str | None = None,
     limit: int = DEFAULT_LIMIT,
+    cursor: str | None = None,
+    max_bytes: int = DEFAULT_RESPONSE_BYTES,
 ) -> dict[str, Any]:
     """Return every event in the window grouped by model (or price model / meter); changes are listed, not netted."""
     start, end = date_window(scope, today, days)
     _check_choice("category", category, CATEGORIES)
     _check_choice("billing", billing, BILLINGS)
     _check_limit(limit)
+    if not MIN_RESPONSE_BYTES <= max_bytes <= MAX_RESPONSE_BYTES:
+        raise ValueError(f"max_bytes must be between {MIN_RESPONSE_BYTES} and {MAX_RESPONSE_BYTES}")
 
     unique = {event["id"]: event for event in events}
     selected = [
@@ -66,20 +100,35 @@ def query_changes(
         if start <= event["date"] <= end and _matches(event, category, billing)
     ]
     _link_planned_retirements(selected)
-    groups, truncated = _limit(_group(selected, newest_first=scope != "upcoming"), limit)
-    return {
+    for event in selected:
+        if "related_event_ids" in event:
+            event["related_event_ids"] = sorted(set(event["related_event_ids"]))
+    ordered = _group(selected, newest_first=scope != "upcoming")
+    fingerprint = ev.event_id({"scope": scope, "from": start, "to": end, "category": category,
+                               "billing": billing, "groups": ordered})
+    offset, detail_offset = _cursor_offset(cursor, fingerprint, len(selected))
+    result = {
         "scope": scope,
         "timezone": ev.LOCAL_TZ_NAME,
         "from": start,
         "to": end,
         "filters": {"category": category, "billing": billing},
         "total_events": len(selected),
-        "returned_events": sum(len(group["events"]) for group in groups),
-        "truncated": truncated,
+        "returned_events": 0,
+        "truncated": False,
+        "next_cursor": None,
+        "max_bytes": max_bytes,
+        "byte_limited": False,
         "summary": dict(sorted(Counter(event["type"] for event in selected).items())),
         "unparsed_price_events": sum(1 for event in selected if event.get("unparsed")),
-        "groups": groups,
+        "groups": [],
     }
+    budget = max_bytes - response_size(result) - _METADATA_RESERVE_BYTES
+    groups, offset, detail_offset, byte_limited = _limit(ordered, limit, offset, detail_offset, budget)
+    result.update(groups=groups, returned_events=sum(len(group["events"]) for group in groups),
+                  truncated=offset < len(selected), byte_limited=byte_limited,
+                  next_cursor=_encode_cursor(fingerprint, offset, detail_offset) if offset < len(selected) else None)
+    return result
 
 
 def _check_choice(name: str, value: str | None, choices: tuple[str, ...]) -> None:
@@ -153,18 +202,84 @@ def _group(events: list[dict[str, Any]], *, newest_first: bool) -> list[dict[str
     return ordered
 
 
-def _limit(groups: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], bool]:
+def response_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
+def _encode_cursor(fingerprint: str, offset: int, detail_offset: int = 0) -> str:
+    payload = {"fingerprint": fingerprint, "offset": offset, "detail_offset": detail_offset}
+    return base64.urlsafe_b64encode(ev.canonical_json(payload).encode()).decode()
+
+
+def _cursor_offset(cursor: str | None, fingerprint: str, total: int) -> tuple[int, int]:
+    if cursor is None:
+        return 0, 0
+    if not isinstance(cursor, str) or len(cursor) > 512:
+        raise ValueError("invalid cursor")
+    try:
+        payload = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
+        offset = payload["offset"]
+        detail_offset = payload.get("detail_offset", 0)
+        expected = payload["fingerprint"]
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        raise ValueError("invalid cursor") from None
+    if expected != fingerprint:
+        raise ValueError("cursor expired or query changed; restart without cursor")
+    if type(offset) is not int or not 0 <= offset < total or type(detail_offset) is not int or detail_offset < 0:
+        raise ValueError("invalid cursor offset")
+    if offset == 0 and detail_offset == 0:
+        raise ValueError("invalid cursor offset")
+    return offset, detail_offset
+
+
+def _limit(
+    groups: list[dict[str, Any]], limit: int, offset: int, detail_offset: int, budget: int,
+) -> tuple[list[dict[str, Any]], int, int, bool]:
+    entries = [(group, event) for group in groups for event in group["events"]]
     result: list[dict[str, Any]] = []
-    remaining = limit
-    for group in groups:
-        if remaining == 0:
-            return result, True
-        if len(group["events"]) > remaining:
-            result.append({**group, "events": group["events"][:remaining], "truncated": True})
-            return result, True
-        result.append(group)
-        remaining -= len(group["events"])
-    return result, False
+    returned = 0
+    while offset < len(entries) and returned < limit:
+        group, event = entries[offset]
+        changes = event.get("changes", [])
+        if detail_offset and detail_offset >= len(changes):
+            raise ValueError("invalid cursor detail offset")
+
+        def candidate(part: Mapping[str, Any]) -> list[dict[str, Any]]:
+            same = bool(result) and result[-1]["subject"] == group["subject"]
+            events = [*result[-1]["events"], part] if same else [part]
+            page_group = {"subject": group["subject"], "events": events}
+            if len(events) < len(group["events"]) or any("changes_total" in item for item in events):
+                page_group["truncated"] = True
+            return [*(result[:-1] if same else result), page_group]
+
+        def fragment(count: int) -> dict[str, Any]:
+            end = detail_offset + count
+            return {**event, "changes": changes[detail_offset:end], "changes_offset": detail_offset,
+                    "changes_total": len(changes), "details_truncated": end < len(changes)}
+
+        whole = fragment(len(changes) - detail_offset) if detail_offset else event
+        page = candidate(whole)
+        if response_size(page) <= budget:
+            result = page
+            offset, detail_offset = offset + 1, 0
+            returned += 1
+            continue
+        low, high = 0, len(changes) - detail_offset
+        while low < high:
+            middle = (low + high + 1) // 2
+            if response_size(candidate(fragment(middle))) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        if low:
+            result = candidate(fragment(low))
+            detail_offset += low
+            if detail_offset == len(changes):
+                offset, detail_offset = offset + 1, 0
+        elif not result:
+            raise ValueError(f"event {event['id']} cannot fit in max_bytes; increase max_bytes")
+        return result, offset, detail_offset, True
+    return result, offset, detail_offset, False
 
 
 def search_models(

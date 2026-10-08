@@ -1,7 +1,7 @@
 import pytest
 
 from core import events as ev
-from core.query import date_window, query_changes
+from core.query import collection_health, date_window, query_changes, response_size
 
 TODAY = "2026-10-07"
 
@@ -35,6 +35,24 @@ def test_windows_do_not_overlap():
     assert date_window("past", TODAY, 7) == ("2026-09-30", "2026-10-06")
     assert date_window("past", TODAY, 30) == ("2026-09-07", "2026-10-06")
     assert date_window("upcoming", TODAY, 7) == ("2026-10-08", "2026-10-14")
+
+
+@pytest.mark.parametrize("state", ["unknown", "collecting", "failed", "degraded"])
+def test_collection_is_incomplete_until_every_source_succeeds(state):
+    status = {"status": state, "snapshot_at": "2026-10-07T00:00:00Z"}
+    result = collection_health({"arm": status, "docs": None}, today=TODAY)
+    assert result["complete"] is False
+    assert result["sources"]["arm"]["status"] == state
+    assert result["sources"]["docs"]["status"] == "unknown"
+
+
+def test_collection_health_uses_shanghai_day_and_actual_cached_snapshot():
+    status = {"status": "complete", "snapshot_at": "2026-10-06T16:00:00Z"}
+    assert collection_health({"arm": status}, today=TODAY)["complete"] is True
+    cached = collection_health({"arm": status}, today=TODAY, served_at={"arm": "2026-10-06T00:00:00Z"})
+    assert cached["complete"] is False
+    assert cached["sources"]["arm"]["status"] == "stale"
+    assert collection_health({"arm": status}, today="2026-10-08")["sources"]["arm"]["status"] == "stale"
 
 
 @pytest.mark.parametrize("days", [0, 31])
@@ -198,3 +216,78 @@ def test_truncation_reports_totals():
 def test_duplicate_events_are_counted_once():
     event = _event("same", TODAY)
     assert query_changes([event, dict(event)], scope="today", today=TODAY)["total_events"] == 1
+
+
+def test_cursor_reads_all_events_once_across_group_boundaries():
+    events = [_event(str(index), TODAY, model=f"model-{index // 30}") for index in range(201)]
+    expected = _ids(query_changes(events, scope="today", today=TODAY, limit=1000))
+    cursor, received = None, []
+    for _ in range(20):
+        page = query_changes(reversed(events), scope="today", today=TODAY, limit=17, cursor=cursor)
+        received.extend(_ids(page))
+        assert page["total_events"] == 201
+        cursor = page["next_cursor"]
+        if cursor is None:
+            assert page["truncated"] is False
+            break
+    assert received == expected
+    assert len(set(received)) == 201
+
+
+@pytest.mark.parametrize("cursor", ["not-base64", "e30=", "W10=", "a" * 513])
+def test_invalid_cursor_is_rejected(cursor):
+    with pytest.raises(ValueError, match="invalid cursor"):
+        query_changes([], scope="today", today=TODAY, cursor=cursor)
+
+
+def test_cursor_rejects_changed_filters_or_data():
+    events = [_event("first", TODAY), _event("second", TODAY)]
+    cursor = query_changes(events, scope="today", today=TODAY, limit=1)["next_cursor"]
+    with pytest.raises(ValueError, match="cursor expired"):
+        query_changes(events, scope="today", today=TODAY, category="lifecycle", cursor=cursor)
+    with pytest.raises(ValueError, match="cursor expired"):
+        query_changes([*events, _event("third", TODAY)], scope="today", today=TODAY, cursor=cursor)
+
+
+def test_byte_budget_pages_large_price_details_without_losing_rows():
+    rows = [{"sku": str(index), "old": 1, "new": 2, "note": "\u6a21\u578b" * 100} for index in range(100)]
+    event = _event("large", TODAY, ev.PRICE_CHANGED, category="price", changes=rows)
+    cursor, received = None, []
+    for _ in range(100):
+        page = query_changes([event], scope="today", today=TODAY, cursor=cursor, max_bytes=16384)
+        assert response_size(page) <= 16384
+        [part] = [item for group in page["groups"] for item in group["events"]]
+        assert part["changes_offset"] == len(received)
+        assert part["changes_total"] == 100
+        received.extend(part["changes"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            assert part["details_truncated"] is False
+            break
+        assert page["byte_limited"] is True
+    assert received == rows
+    assert event["changes"] == rows
+
+
+def test_byte_budget_pages_whole_events_before_the_count_limit():
+    events = [_event(str(index), TODAY, old="x" * 3000) for index in range(10)]
+    first = query_changes(events, scope="today", today=TODAY, max_bytes=16384)
+    assert first["byte_limited"] is True and first["returned_events"] < 10
+    assert first["next_cursor"] is not None
+    with pytest.raises(ValueError, match="increase max_bytes"):
+        query_changes([_event("huge", TODAY, old="x" * 20000)], scope="today", today=TODAY, max_bytes=16384)
+    assert query_changes([_event("huge", TODAY, old="x" * 20000)], scope="today", today=TODAY)["returned_events"] == 1
+
+
+@pytest.mark.parametrize("max_bytes", [0, 16383, 1048577])
+def test_invalid_response_budget(max_bytes):
+    with pytest.raises(ValueError, match="max_bytes"):
+        query_changes([], scope="today", today=TODAY, max_bytes=max_bytes)
+
+
+def test_cursor_fingerprint_is_stable_for_reordered_retirement_links():
+    events = [_event("plan", TODAY, ev.RETIRING, kind="scheduled", field="inference"),
+              _event("gone", TODAY, ev.MODEL_REMOVED), _event("retired", TODAY, ev.STATUS_CHANGED, new="Deprecated")]
+    page = query_changes(events, scope="today", today=TODAY, limit=1)
+    following = query_changes(reversed(events), scope="today", today=TODAY, cursor=page["next_cursor"])
+    assert following["returned_events"] == 2

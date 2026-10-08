@@ -13,7 +13,8 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .events import OBSERVED, canonical_json
+from .events import OBSERVED, canonical_json, local_date, shift_date
+from .schedule import reconcile_schedule
 
 SNAPSHOT_CONTAINER = "snapshots"
 EVENTS_TABLE = "events"
@@ -90,18 +91,108 @@ class Store:
     def save_snapshot(self, day: str, kind: str, data: Mapping[str, Any]) -> None:
         from azure.storage.blob import ContentSettings
 
+        name = snapshot_name(day, kind)
         self._container.upload_blob(
-            snapshot_name(day, kind),
+            name,
             encode_snapshot(data),
             overwrite=True,
             content_settings=ContentSettings(content_type="application/gzip"),
         )
+        index_name = f"latest/{kind}.json.gz"
+        index = self._read_optional(index_name)
+        current = index.get("current") if index else None
+        if current and current > name:
+            if not index.get("previous") or name > index["previous"]:
+                self._container.upload_blob(index_name, encode_snapshot({**index, "previous": name}), overwrite=True)
+            return
+        if current == name:
+            previous = index.get("previous")
+        elif current:
+            previous = current
+        else:
+            previous = pick_latest(self._container.list_blob_names(), kind, before=day)
+        self._container.upload_blob(index_name, encode_snapshot({"current": name, "previous": previous}), overwrite=True)
 
     def latest_snapshot(self, kind: str, before: str | None = None) -> dict[str, Any] | None:
+        snapshot_name("", kind)
+        index = self._read_optional(f"latest/{kind}.json.gz")
+        if index:
+            name = pick_latest((name for name in index.values() if name), kind, before)
+            if name:
+                return decode_snapshot(self._container.download_blob(name).readall())
+            if index.get("previous") is None:
+                return None
         name = pick_latest(self._container.list_blob_names(), kind, before)
         if name is None:
             return None
         return decode_snapshot(self._container.download_blob(name).readall())
+
+    def _read_optional(self, name: str) -> dict[str, Any] | None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            return decode_snapshot(self._container.download_blob(name).readall())
+        except ResourceNotFoundError:
+            return None
+
+    def source_status(self, kind: str) -> dict[str, Any] | None:
+        snapshot_name("", kind)
+        return self._read_optional(f"status/{kind}.json.gz")
+
+    def save_source_status(self, kind: str, status: Mapping[str, Any]) -> None:
+        day = local_date(status["last_attempt_at"])
+        data = encode_snapshot(status)
+        self._container.upload_blob(f"runs/{snapshot_name(day, kind)}", data, overwrite=True)
+        self._container.upload_blob(f"status/{kind}.json.gz", data, overwrite=True)
+
+    def stage_run(self, day: str, kind: str, batch: Mapping[str, Any]) -> None:
+        self._container.upload_blob(f"pending/{snapshot_name(day, kind)}", encode_snapshot(batch), overwrite=True)
+
+    def pending_runs(self, kind: str) -> Iterable[tuple[str, dict[str, Any]]]:
+        for name in sorted(self._container.list_blob_names(name_starts_with="pending/")):
+            match = _BLOB_NAME.fullmatch(name.removeprefix("pending/"))
+            if match and match.group(2) == kind:
+                yield match.group(1), decode_snapshot(self._container.download_blob(name).readall())
+
+    def discard_run(self, day: str, kind: str) -> None:
+        self._container.delete_blob(f"pending/{snapshot_name(day, kind)}")
+
+    def commit_run(
+        self, day: str, kind: str, snapshot: Mapping[str, Any], observed: Iterable[Mapping[str, Any]],
+        scheduled: Iterable[Mapping[str, Any]] | None = None, *, replace: bool = True,
+    ) -> dict[str, int]:
+        batch = {
+            "snapshot": snapshot,
+            "observed": list(observed),
+            "scheduled": list(scheduled) if scheduled is not None else None,
+            "replace": replace,
+        }
+        self.stage_run(day, kind, batch)
+        return self._complete_run(day, kind, batch)
+
+    def recover_pending(self, kind: str) -> dict[str, Any] | None:
+        recovered = None
+        for day, batch in self.pending_runs(kind):
+            self._complete_run(day, kind, batch)
+            recovered = batch["snapshot"]
+        return recovered
+
+    def _complete_run(self, day: str, kind: str, batch: Mapping[str, Any]) -> dict[str, int]:
+        source = "retail_prices" if kind == "prices" else kind
+        if batch["replace"]:
+            self.replace_observed(day, source, batch["observed"])
+        else:
+            self.add_observed(batch["observed"])
+        counts = {}
+        if batch["scheduled"] is not None:
+            start = min([shift_date(day, 1), *(event["date"] for event in batch["scheduled"])])
+            existing = self.schedule_dates(source, start=start)
+            upserts, deletes = reconcile_schedule(existing, batch["scheduled"], day)
+            self.apply_schedule(upserts, {event_id: existing[event_id] for event_id in deletes})
+            counts = {"schedule_upserts": len(upserts), "schedule_deletes": len(deletes)}
+        self.save_snapshot(day, kind, batch["snapshot"])
+        self.discard_run(day, kind)
+        return counts
 
     # Events
 
@@ -122,9 +213,14 @@ class Store:
     def add_observed(self, events: Iterable[Mapping[str, Any]]) -> None:
         _submit(self._tables[OBSERVED], [("upsert", to_entity(e), {"mode": "replace"}) for e in events])
 
-    def schedule_dates(self, source: str) -> dict[str, str]:
+    def schedule_dates(self, source: str, *, start: str | None = None) -> dict[str, str]:
+        query = "source eq @source"
+        parameters = {"source": source}
+        if start:
+            query += " and PartitionKey ge @start"
+            parameters["start"] = start
         rows = self._tables["scheduled"].query_entities(
-            "source eq @source", parameters={"source": source}, select=["PartitionKey", "RowKey"]
+            query, parameters=parameters, select=["PartitionKey", "RowKey"]
         )
         return {row["RowKey"]: row["PartitionKey"] for row in rows}
 
@@ -134,12 +230,19 @@ class Store:
         operations += [("upsert", to_entity(event), {"mode": "replace"}) for event in upserts]
         _submit(self._tables["scheduled"], operations)
 
-    def read_events(self, start: str, end: str) -> list[dict[str, Any]]:
+    def read_events(
+        self, start: str, end: str, *, category: str | None = None, scheduled_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = "PartitionKey ge @start and PartitionKey le @end"
+        parameters = {"start": start, "end": end}
+        if category:
+            query += " and category eq @category"
+            parameters["category"] = category
         events = []
-        for table in self._tables.values():
-            for entity in table.query_entities(
-                "PartitionKey ge @start and PartitionKey le @end", parameters={"start": start, "end": end}
-            ):
+        for kind, table in self._tables.items():
+            if scheduled_only and kind == OBSERVED:
+                continue
+            for entity in table.query_entities(query, parameters=parameters):
                 events.append(from_entity(entity))
         return events
 

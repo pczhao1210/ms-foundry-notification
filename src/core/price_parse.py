@@ -148,8 +148,12 @@ def label_meters(records: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str], 
     }
 
 
-def normalize_prices(items: Iterable[Mapping[str, Any]], *, collected_at: str) -> dict[str, Any]:
+def normalize_prices(
+    items: Iterable[Mapping[str, Any]], *, collected_at: str, previous: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    collected_at = to_utc_iso(collected_at)
     prices: dict[str, dict[str, Any]] = {}
+    future: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for item in items:
         billing = classify(item)
         if billing is None:
@@ -159,7 +163,7 @@ def normalize_prices(items: Iterable[Mapping[str, Any]], *, collected_at: str) -
             price, unit = raw_price * _TOKEN_MULTIPLIER[item["unitOfMeasure"]], TOKEN_UNIT
         else:
             price, unit = raw_price, HOUR_UNIT
-        prices[price_key(item)] = {
+        record = {
             "region": item["armRegionName"],
             "product": item["productName"],
             "sku": item["skuName"],
@@ -170,8 +174,17 @@ def normalize_prices(items: Iterable[Mapping[str, Any]], *, collected_at: str) -
             "unit": unit,
             "effective_start": to_utc_iso(item.get("effectiveStartDate")),
         }
+        key, effective = price_key(item), record["effective_start"]
+        if effective and effective > collected_at:
+            future[key][effective] = record
+        elif key not in prices or (effective or "") > (prices[key]["effective_start"] or ""):
+            prices[key] = record
+    for key in future:
+        if key not in prices and key in (previous or {}).get("prices", {}):
+            prices[key] = dict(previous["prices"][key])
     return {
         "schema_version": SCHEMA_VERSION,
-        "collected_at": to_utc_iso(collected_at),
+        "collected_at": collected_at,
         "prices": dict(sorted(prices.items())),
+        "future_prices": {key: [records[at] for at in sorted(records)] for key, records in sorted(future.items())},
     }

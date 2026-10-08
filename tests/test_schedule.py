@@ -1,6 +1,6 @@
-from builders import arm_item, load_fixture, sku, snapshot
+from builders import arm_item, load_fixture, price_row, price_snapshot, sku, snapshot
 from core import events as ev
-from core.schedule import build_schedule, reconcile_schedule
+from core.schedule import build_price_schedule, build_schedule, reconcile_schedule
 
 
 def test_fixture_sku_dates_equal_to_model_retirement_are_not_duplicated():
@@ -57,3 +57,21 @@ def test_reconcile_replaces_future_entries_and_freezes_history():
     upserts, deletes = reconcile_schedule(existing, computed, today)
     assert [e["id"] for e in upserts] == ["moved-new", "future", "past-new"]
     assert deletes == ["moved-old"]
+
+
+def test_future_price_schedule_compares_each_announced_effective_date():
+    snap = price_snapshot([price_row(1.0), price_row(2.0, effective="2026-11-01T00:00:00Z"),
+                           price_row(3.0, effective="2026-12-01T00:00:00Z")])
+    events = build_price_schedule(snap)
+    assert [event["date"] for event in events] == ["2026-11-01", "2026-12-01"]
+    assert [(event["changes"][0]["old"], event["changes"][0]["new"]) for event in events] == [(1.0, 2.0), (2.0, 3.0)]
+    assert all(event["kind"] == ev.SCHEDULED and event["source"] == "retail_prices" for event in events)
+    assert all("observed_at" not in event and "baseline_at" not in event for event in events)
+    assert events == build_price_schedule(snap)
+
+
+def test_future_new_meter_is_scheduled_not_current():
+    snap = price_snapshot([price_row(2.0, effective="2026-11-01T00:00:00Z")])
+    [event] = build_price_schedule(snap)
+    assert snap["prices"] == {}
+    assert event["type"] == ev.PRICE_ADDED

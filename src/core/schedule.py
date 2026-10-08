@@ -1,11 +1,32 @@
 """Derive scheduled lifecycle events from a snapshot and reconcile them with the stored schedule."""
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from . import events as ev
+from .diff import diff_prices
 from .normalize import billing_of, model_ref, sku_ref
+
+
+def build_price_schedule(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    by_date: dict[str, dict[str, Any]] = defaultdict(dict)
+    for key, records in snapshot.get("future_prices", {}).items():
+        for record in records:
+            by_date[record["effective_start"]][key] = record
+    current = {"collected_at": snapshot["collected_at"], "prices": snapshot["prices"]}
+    result = []
+    for at, updates in sorted(by_date.items()):
+        future = {"collected_at": at, "prices": {**current["prices"], **updates}}
+        for event in diff_prices(current, future):
+            event["id"] = ev.event_id({"kind": ev.SCHEDULED, "effective_at": at, "change_id": event["id"]})
+            event.update(kind=ev.SCHEDULED, effective_at=at)
+            del event["observed_at"]
+            del event["baseline_at"]
+            result.append(event)
+        current = future
+    return sorted(result, key=ev.sort_key)
 
 
 def build_schedule(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:

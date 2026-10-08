@@ -8,26 +8,35 @@ REPO="${DEPLOY_REPO:-pczhao1210/ms-foundry-notification}"
 ENV_NAME="${AZURE_ENV_NAME:-}"
 LOCATION="${AZURE_LOCATION:-eastus2}"
 SUBSCRIPTION="${AZURE_SUBSCRIPTION_ID:-}"
+RESOURCE_GROUP_NAME="${AZURE_RESOURCE_GROUP:-}"
+RESOURCE_PREFIX="${AZURE_RESOURCE_NAME_PREFIX:-}"
 REF=""
 WHAT_IF=false
 SKIP_INFRA=false
 SKIP_CODE=false
 ASSUME_YES=false
+ENABLE_ALERTS=false
 
 usage() {
   cat <<EOF
-用法: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/deploy.sh | bash -s -- -e <env-name> [选项]
-      bash deploy.sh -e <env-name> [选项]
+用法: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/deploy.sh | bash -s -- [选项]
+  bash deploy.sh [选项]
 
-  -e, --env-name NAME       环境名（资源命名前缀，3-16 位小写字母/数字/-），也可用 AZURE_ENV_NAME
+默认逐步选择区域、资源组、资源名称前缀；回车保留默认。-y / --what-if 跳过向导。
+
+  -e, --env-name NAME       环境名（默认 foundry-notify，3-16 位小写字母/数字/-），也可用 AZURE_ENV_NAME
   -l, --location REGION     部署区域（默认 eastus2，需支持 Flex Consumption），也可用 AZURE_LOCATION
+  -g, --resource-group NAME 资源组（默认 rg-<env-name>），也可用 AZURE_RESOURCE_GROUP
+  --resource-prefix NAME 资源名称前缀（向导默认环境名，3-16 位小写字母/数字/-）
+                            也可用 AZURE_RESOURCE_NAME_PREFIX；非交互未指定时保留旧命名
   -s, --subscription ID     目标订阅（默认当前 az 订阅），也可用 AZURE_SUBSCRIPTION_ID
   -r, --ref REF             从 github.com/${REPO} 下载指定分支/标签/commit 的源码
                             （默认 main；在仓库 checkout 中运行且未指定时使用本地文件）
       --what-if             仅预览基础设施变更，不做任何修改
       --skip-infra          跳过 Bicep，仅发布代码（需已部署过同名环境）
       --skip-code           仅部署基础设施，不发布代码
-  -y, --yes                 不询问确认
+      --enable-alerts       启用采集失败/超过 32 小时未完成告警（建议首次采集成功后启用；可能产生 Monitor 费用）
+  -y, --yes                 跳过向导及确认，使用参数/环境变量/默认值
   -h, --help                显示帮助
 
 所需权限：订阅级 Owner，或 Contributor + User Access Administrator / RBAC Administrator
@@ -45,15 +54,62 @@ parse_args() {
       -e|--env-name)     ENV_NAME="${2:?}"; shift 2 ;;
       -l|--location)     LOCATION="${2:?}"; shift 2 ;;
       -s|--subscription) SUBSCRIPTION="${2:?}"; shift 2 ;;
+      -g|--resource-group) RESOURCE_GROUP_NAME="${2:?}"; shift 2 ;;
+      --resource-prefix) RESOURCE_PREFIX="${2:?}"; shift 2 ;;
       -r|--ref)          REF="${2:?}"; shift 2 ;;
       --what-if)         WHAT_IF=true; shift ;;
       --skip-infra)      SKIP_INFRA=true; shift ;;
       --skip-code)       SKIP_CODE=true; shift ;;
+      --enable-alerts)   ENABLE_ALERTS=true; shift ;;
       -y|--yes)          ASSUME_YES=true; shift ;;
       -h|--help)         usage; exit 0 ;;
       *) usage >&2; die "未知参数: $1" ;;
     esac
   done
+}
+
+choose_value() {
+  local variable="$1" label="$2" default="$3" reply choice_index
+  shift 3
+  local choices=("$@")
+  for choice_index in "${!choices[@]}"; do
+    printf '  %d) %s\n' "$((choice_index + 1))" "${choices[$choice_index]}"
+  done
+  while true; do
+    read -r -p "${label} [${default}]（编号或名称，回车保留）: " reply </dev/tty \
+      || die "无法读取部署选项"
+    if [[ ${#choices[@]} -gt 0 && "$reply" =~ ^[0-9]+$ ]]; then
+      if [[ ${#reply} -le 6 ]] && (( 10#$reply >= 1 && 10#$reply <= ${#choices[@]} )); then
+        reply="${choices[$((10#$reply - 1))]}"
+      else
+        warn "请选择有效编号或输入名称"
+        continue
+      fi
+    fi
+    printf -v "$variable" '%s' "${reply:-$default}"
+    return
+  done
+}
+
+deployment_options() {
+  local regions groups
+  local region_choices=() group_choices=()
+  if ! { : </dev/tty; } 2>/dev/null; then
+    die "无法交互选择部署选项，请加 -y"
+  fi
+  if ! $SKIP_INFRA; then
+    log "1/3 选择 region"
+    regions="$(az functionapp list-flexconsumption-locations --query '[].name' -o tsv)" \
+      || die "无法获取 Flex Consumption 区域列表"
+    if [[ -n "$regions" ]]; then mapfile -t region_choices <<<"$regions"; fi
+    choose_value LOCATION "区域" "$LOCATION" "${region_choices[@]}"
+    log "2/3 选择资源组（也可输入新资源组名称）"
+    groups="$(az group list --query '[].name' -o tsv)" || die "无法获取资源组列表"
+    if [[ -n "$groups" ]]; then mapfile -t group_choices <<<"$groups"; fi
+    choose_value RESOURCE_GROUP_NAME "资源组" "$RESOURCE_GROUP_NAME" "${group_choices[@]}"
+    log "3/3 输入资源名称前缀"
+    choose_value RESOURCE_PREFIX "资源名称前缀" "${RESOURCE_PREFIX:-$ENV_NAME}"
+  fi
 }
 
 # 设置 SOURCE_DIR：脚本旁有 infra/ 且未指定 --ref 时用本地 checkout，否则下载 GitHub 源码包。
@@ -93,6 +149,10 @@ register_providers() {
             Microsoft.ManagedIdentity Microsoft.CognitiveServices; do
     state="$(az provider show -n "$ns" --query registrationState -o tsv 2>/dev/null || echo NotRegistered)"
     if [[ "$state" != "Registered" ]]; then
+      if $WHAT_IF; then
+        warn "${ns} 尚未注册；预览模式不执行注册，正式部署时会注册"
+        continue
+      fi
       log "注册资源提供程序 ${ns} ..."
       az provider register -n "$ns" --wait -o none
     fi
@@ -107,8 +167,12 @@ check_flex_location() {
 }
 
 deploy_infra() {
+  local group_location
+  group_location="$(az group show -n "$RESOURCE_GROUP_NAME" --query location -o tsv 2>/dev/null || true)"
   local args=(--name "$DEPLOYMENT_NAME" --location "$LOCATION" --template-file "$BICEP_FILE"
-              --parameters environmentName="$ENV_NAME" location="$LOCATION")
+              --parameters environmentName="$ENV_NAME" location="$LOCATION" enableCollectionAlerts="$ENABLE_ALERTS"
+              resourceGroupName="$RESOURCE_GROUP_NAME" resourceNamePrefix="$RESOURCE_PREFIX"
+              resourceGroupLocation="${group_location:-$LOCATION}")
   if $WHAT_IF; then
     log "预览基础设施变更 (what-if) ..."
     az deployment sub what-if "${args[@]}"
@@ -156,25 +220,33 @@ deploy_code() {
 }
 
 verify() {
-  local names code
+  local names short_names code expected path
+  local required=(daily_collect rest_changes_today rest_changes_upcoming rest_changes_past rest_models rest_model rest_prices
+                  mcp_get_today_changes mcp_get_upcoming_changes mcp_get_past_changes mcp_search_models mcp_get_model mcp_get_model_prices)
+  local missing=()
   log "等待函数注册 ..."
   for _ in $(seq 1 24); do
     names="$(az functionapp function list -g "$RESOURCE_GROUP" -n "$FUNCTION_APP_NAME" --query "[].name" -o tsv 2>/dev/null || true)"
-    [[ -n "$names" ]] && break
+    short_names="$(sed 's|.*/||' <<<"$names")"
+    missing=()
+    for expected in "${required[@]}"; do
+      if ! grep -Fxq "$expected" <<<"$short_names"; then missing+=("$expected"); fi
+    done
+    [[ ${#missing[@]} -eq 0 ]] && break
     sleep 5
   done
-  if [[ -n "$names" ]]; then
-    # shellcheck disable=SC2001
-    sed 's/^/    /' <<<"$names"
-  else
-    warn "暂未列出函数，稍后在门户确认"
-  fi
-  code="$(curl -s -o /dev/null -w '%{http_code}' "https://${FUNCTION_APP_HOST}/api/changes/today" || true)"
-  if [[ "$code" == "401" ]]; then
-    log "鉴权检查通过：无 key 访问返回 401"
-  else
-    warn "无 key 访问 /api/changes/today 返回 ${code}（期望 401）"
-  fi
+  [[ ${#missing[@]} -eq 0 ]] || die "函数注册不完整，缺少: ${missing[*]}"
+  sed 's/^/    /' <<<"$names"
+  for path in /api/changes/today /runtime/webhooks/mcp; do
+    local args=(-sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}')
+    if [[ "$path" == /runtime/webhooks/mcp ]]; then
+      args+=(-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream'
+             --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"deploy-check","version":"1.0"}}}')
+    fi
+    code="$(curl "${args[@]}" "https://${FUNCTION_APP_HOST}${path}" || true)"
+    [[ "$code" == "401" ]] || die "无 key 访问 ${path} 返回 ${code}（期望 401），部署验收失败"
+    log "鉴权检查通过：${path} 无 key 访问返回 401"
+  done
 }
 
 print_summary() {
@@ -207,15 +279,25 @@ confirm() {
 
 main() {
   parse_args "$@"
-  [[ -n "$ENV_NAME" ]] || { usage >&2; die "缺少 --env-name"; }
+  ENV_NAME="${ENV_NAME:-foundry-notify}"
+  RESOURCE_GROUP_NAME="${RESOURCE_GROUP_NAME:-rg-${ENV_NAME}}"
   [[ "$ENV_NAME" =~ ^[a-z0-9][a-z0-9-]{1,14}[a-z0-9]$ ]] || die "env-name 需为 3-16 位小写字母/数字/-"
   if $SKIP_INFRA && $SKIP_CODE; then die "--skip-infra 与 --skip-code 不能同时使用"; fi
   if $SKIP_INFRA && $WHAT_IF; then die "--what-if 只用于预览基础设施，不能与 --skip-infra 同时使用"; fi
+  if $SKIP_INFRA && $ENABLE_ALERTS; then die "--enable-alerts 需要部署基础设施，不能与 --skip-infra 同时使用"; fi
 
   command -v az >/dev/null      || die "未找到 az CLI（Cloud Shell 已内置）"
   command -v python3 >/dev/null || die "未找到 python3（用于打包 zip）"
   command -v curl >/dev/null    || die "未找到 curl"
   az account show >/dev/null 2>&1 || die "未登录，请先运行 az login（Cloud Shell 已自动登录）"
+
+  if [[ -n "$SUBSCRIPTION" ]]; then az account set --subscription "$SUBSCRIPTION"; fi
+  if ! $ASSUME_YES && ! $WHAT_IF; then deployment_options; fi
+  [[ "$LOCATION" =~ ^[a-z0-9-]+$ ]] || die "region 需为小写字母/数字/-"
+  [[ "$RESOURCE_GROUP_NAME" =~ ^[a-zA-Z0-9_.()-]{1,90}$ && "$RESOURCE_GROUP_NAME" != *. ]] \
+    || die "资源组名需为 1-90 位字母/数字/下划线/括号/连字符/点，不能以点结尾"
+  [[ -z "$RESOURCE_PREFIX" || "$RESOURCE_PREFIX" =~ ^[a-z0-9][a-z0-9-]{1,14}[a-z0-9]$ ]] \
+    || die "资源名称前缀需为 3-16 位小写字母/数字/-，首尾为字母或数字"
 
   WORK_DIR="$(mktemp -d)"
   trap 'rm -rf "$WORK_DIR"' EXIT
@@ -225,12 +307,14 @@ main() {
   [[ -f "$BICEP_FILE" ]] || die "源码中未找到 infra/main.bicep"
   $SKIP_CODE || [[ -f "${SRC_DIR}/function_app.py" ]] || die "源码中未找到 src/function_app.py"
 
-  if [[ -n "$SUBSCRIPTION" ]]; then az account set --subscription "$SUBSCRIPTION"; fi
   SUB_ID="$(az account show --query id -o tsv)"
   SUB_NAME="$(az account show --query name -o tsv)"
   DEPLOYMENT_NAME="foundry-notify-${ENV_NAME}"
   log "订阅: ${SUB_NAME} (${SUB_ID})"
   log "环境: ${ENV_NAME}   区域: ${LOCATION}   部署名: ${DEPLOYMENT_NAME}"
+  if ! $SKIP_INFRA; then
+    log "资源组: ${RESOURCE_GROUP_NAME}   资源名称前缀: ${RESOURCE_PREFIX:-默认命名}"
+  fi
 
   if ! $ASSUME_YES && ! $WHAT_IF; then confirm; fi
 

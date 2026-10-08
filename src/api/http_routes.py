@@ -9,7 +9,7 @@ from typing import Any
 import azure.functions as func
 
 from api import service
-from core.query import DEFAULT_DAYS
+from core.query import DEFAULT_DAYS, DEFAULT_LIMIT, DEFAULT_RESPONSE_BYTES
 
 bp = func.Blueprint()
 log = logging.getLogger(__name__)
@@ -38,32 +38,41 @@ def _param(req: func.HttpRequest, name: str) -> str | None:
 
 
 def _days(req: func.HttpRequest) -> int:
-    value = _param(req, "days")
+    return _integer(req, "days", DEFAULT_DAYS)
+
+
+def _integer(req: func.HttpRequest, name: str, default: int) -> int:
+    value = _param(req, name)
     if value is None:
-        return DEFAULT_DAYS
+        return default
     try:
         return int(value)
     except ValueError:
-        raise ValueError("days must be an integer") from None
+        raise ValueError(f"{name} must be an integer") from None
+
+
+def _page(req: func.HttpRequest) -> dict[str, Any]:
+    return {"limit": _integer(req, "limit", DEFAULT_LIMIT), "cursor": _param(req, "cursor"),
+            "max_bytes": _integer(req, "max_bytes", DEFAULT_RESPONSE_BYTES)}
 
 
 @bp.route(route="changes/today", methods=["GET"], auth_level=_AUTH)
 def rest_changes_today(req: func.HttpRequest) -> func.HttpResponse:
     return _handle(
-        lambda: service.changes("today", category=_param(req, "category"), billing=_param(req, "billing"))
+        lambda: service.changes("today", category=_param(req, "category"), billing=_param(req, "billing"), **_page(req))
     )
 
 
 @bp.route(route="changes/upcoming", methods=["GET"], auth_level=_AUTH)
 def rest_changes_upcoming(req: func.HttpRequest) -> func.HttpResponse:
-    return _handle(lambda: service.changes("upcoming", days=_days(req), billing=_param(req, "billing")))
+    return _handle(lambda: service.changes("upcoming", days=_days(req), billing=_param(req, "billing"), **_page(req)))
 
 
 @bp.route(route="changes/past", methods=["GET"], auth_level=_AUTH)
 def rest_changes_past(req: func.HttpRequest) -> func.HttpResponse:
     return _handle(
         lambda: service.changes(
-            "past", days=_days(req), category=_param(req, "category"), billing=_param(req, "billing")
+            "past", days=_days(req), category=_param(req, "category"), billing=_param(req, "billing"), **_page(req)
         )
     )
 

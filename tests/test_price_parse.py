@@ -1,6 +1,6 @@
 import pytest
 
-from builders import load_fixture
+from builders import load_fixture, price_row
 from core.price_parse import (
     DIMENSIONS,
     HOUR_UNIT,
@@ -121,3 +121,23 @@ def test_fixture_meters_parse_into_models():
         meters = [d for (product, _), d in parsed.items() if product == "Azure OpenAI GPT5" and d["model"] == model]
         assert len(meters) == count
         assert len({tuple(d[x] for x in DIMENSIONS) for d in meters}) == count
+
+
+def test_future_prices_are_separate_and_current_selection_is_order_independent():
+    rows = [price_row(1.0), price_row(2.0, effective="2026-10-07T00:00:00Z"),
+            price_row(3.0, effective="2026-11-01T00:00:00Z"), price_row(4.0, effective="2026-12-01T00:00:00Z")]
+    current = normalize_prices(rows, collected_at="2026-10-07T00:00:00Z")
+    assert current == normalize_prices(reversed(rows), collected_at="2026-10-07T00:00:00Z")
+    assert [record["price"] for record in current["prices"].values()] == [2.0]
+    assert [record["price"] for records in current["future_prices"].values() for record in records] == [3.0, 4.0]
+
+
+def test_future_only_meter_preserves_known_current_price():
+    previous = normalize_prices([price_row(1.0)], collected_at="2026-10-06T00:00:00Z")
+    rows = [price_row(2.0, effective="2026-11-01T00:00:00Z")]
+    current = normalize_prices(rows, collected_at="2026-10-07T00:00:00Z", previous=previous)
+    assert current["prices"] == previous["prices"]
+    assert normalize_prices(rows, collected_at="2026-10-07T00:00:00Z")["prices"] == {}
+    effective = normalize_prices(rows, collected_at="2026-11-01T00:00:00Z", previous=current)
+    assert [record["price"] for record in effective["prices"].values()] == [2.0]
+    assert effective["future_prices"] == {}
