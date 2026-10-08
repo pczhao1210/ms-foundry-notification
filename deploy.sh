@@ -221,7 +221,7 @@ deploy_infra() {
     return
   fi
   log "部署基础设施 (Bicep, 订阅级) ..."
-  az deployment sub create "${args[@]}" -o none
+  az deployment sub create "${args[@]}" --validation-level Template -o none
 }
 
 read_outputs() {

@@ -132,6 +132,22 @@ def test_alerts_default_to_disabled(deploy):
     assert any("enableCollectionAlerts=false" in call for call in calls)
 
 
+def test_subscription_deployment_uses_template_validation(deploy):
+    result, calls = deploy("--skip-code", "-y")
+    assert result.returncode == 0, result.stderr
+    deployment = next(call for call in calls if call.startswith("az deployment sub create"))
+    assert "--validation-level Template" in deployment
+    assert "resourceGroupName=rg-review" in deployment
+    assert not any(call.startswith("az group create") for call in calls)
+
+
+def test_what_if_keeps_provider_validation(deploy):
+    result, calls = deploy("--what-if")
+    assert result.returncode == 0, result.stderr
+    deployment = next(call for call in calls if call.startswith("az deployment sub what-if"))
+    assert "--validation-level" not in deployment
+
+
 @pytest.mark.parametrize("setting, code", [("MOCK_REST_CODE", "200"), ("MOCK_REST_CODE", "500"),
                                            ("MOCK_MCP_CODE", "200"), ("MOCK_MCP_CODE", "404")])
 def test_authentication_failure_is_a_failed_deployment(deploy, setting, code):
