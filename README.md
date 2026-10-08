@@ -74,7 +74,9 @@ az functionapp keys list -g <rg> -n <app> --query systemKeys.mcp_extension -o ts
 curl -fsSL https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/main/deploy.sh | bash
 ```
 
-默认进入三步向导，每步直接回车保留默认：
+默认先选择订阅，再进入三步部署向导，每步直接回车保留默认：
+如果有多个可用（Enabled）订阅，先显示订阅名称和 ID，可输入编号、名称或 ID；回车保留当前订阅。只有一个可用订阅时自动使用。`-s/--subscription` 或 `AZURE_SUBSCRIPTION_ID` 已指定订阅时跳过此步骤；重名订阅请用编号或 ID 区分。
+
 1. 选择 region：显示支持 Flex Consumption 的区域，可输入编号或名称，默认 `eastus2`。
 2. 选择资源组：显示当前订阅已有组，可输入编号、已有组名或新组名，默认 `rg-foundry-notify`。已有组保留其所在地，资源部署到所选 region。
 3. 输入资源名称前缀：默认 `foundry-notify`；最终确认后才开始部署。
@@ -100,7 +102,7 @@ cd ms-foundry-notification
 bash deploy.sh
 ```
 
-资源名称保留唯一性后缀，例如 `func-<prefix>-<token>`；存储账户去掉前缀中的 `-`，只使用前 9 位，再加完整唯一性后缀以满足 24 位限制。后续基础设施部署须沿用相同环境名、区域、资源组与前缀；更改资源组或前缀会创建新资源，不会迁移数据或删除旧资源。`-y`、`--what-if` 跳过向导，非交互模式未指定前缀时保留旧版哈希命名；预览向导配置时需显式传入 `-g` 和 `--resource-prefix`。`--skip-infra` 跳过三步向导，按同名环境的部署输出更新代码。
+资源名称保留唯一性后缀，例如 `func-<prefix>-<token>`；存储账户去掉前缀中的 `-`，只使用前 9 位，再加完整唯一性后缀以满足 24 位限制。后续基础设施部署须沿用相同环境名、区域、资源组与前缀；更改资源组或前缀会创建新资源，不会迁移数据或删除旧资源。`-y`、`--what-if` 跳过订阅选择及部署向导，使用显式指定的订阅或当前订阅；非交互模式未指定前缀时保留旧版哈希命名。预览向导配置时需显式传入 `-g` 和 `--resource-prefix`。`--skip-infra` 仍会按需选择订阅，但跳过区域、资源组、前缀三步，读取所选订阅内同名环境的部署输出更新代码。
 
 脚本只依赖 `az`、`python3`、`curl`（Cloud Shell 均已内置）：选择部署选项 → 获取源码 → 订阅级 Bicep 部署 → 打包 `src/` → `az functionapp deployment source config-zip --build-remote true`（Flex Consumption 远程构建）→ 确认完整 13 个函数注册，REST/MCP 无 key 请求均返回 401 → 输出端点与取 key 命令（不打印密钥值）。验收失败会非零退出；仍需在本人终端使用调用方密钥验证实际 REST/MCP 查询。`--what-if` 不注册资源提供程序或部署资源。相同配置可重复执行（幂等）。通过管道运行时向导与部署确认均从 `/dev/tty` 读取；无终端（如 CI）时请加 `-y`。
 

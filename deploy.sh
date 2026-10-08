@@ -22,7 +22,8 @@ usage() {
 用法: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/deploy.sh | bash -s -- [选项]
   bash deploy.sh [选项]
 
-默认逐步选择区域、资源组、资源名称前缀；回车保留默认。-y / --what-if 跳过向导。
+默认先选择订阅（多个可用订阅时），再选择区域、资源组、资源名称前缀；回车保留默认。
+-s / AZURE_SUBSCRIPTION_ID 指定订阅时不再询问；-y / --what-if 跳过向导。
 
   -e, --env-name NAME       环境名（默认 foundry-notify，3-16 位小写字母/数字/-），也可用 AZURE_ENV_NAME
   -l, --location REGION     部署区域（默认 eastus2，需支持 Flex Consumption），也可用 AZURE_LOCATION
@@ -91,12 +92,53 @@ choose_value() {
   done
 }
 
+select_subscription() {
+  local accounts rows current selected default subscription_id label choice_index
+  local subscription_ids=() subscription_choices=()
+  accounts="$(az account list --query "[?state=='Enabled'].{name:name,id:id}" -o json)" \
+    || die "无法获取订阅列表"
+  rows="$(python3 -c 'import json, sys
+for account in json.load(sys.stdin):
+    print(account["id"] + "\t" + account["name"] + " (" + account["id"] + ")")' <<<"$accounts")" \
+    || die "无法解析订阅列表"
+  if [[ -n "$rows" ]]; then
+    while IFS=$'\t' read -r subscription_id label; do
+      subscription_ids+=("$subscription_id")
+      subscription_choices+=("$label")
+    done <<<"$rows"
+  fi
+  [[ ${#subscription_ids[@]} -gt 0 ]] || die "没有可用订阅，请检查 Azure 登录与订阅权限"
+  if [[ ${#subscription_ids[@]} -eq 1 ]]; then
+    SUBSCRIPTION="${subscription_ids[0]}"
+    log "使用唯一可用订阅: ${subscription_choices[0]}"
+  else
+    current="$(az account show --query id -o tsv)"
+    default="${subscription_choices[0]}"
+    for choice_index in "${!subscription_ids[@]}"; do
+      if [[ "${subscription_ids[$choice_index]}" == "$current" ]]; then
+        default="${subscription_choices[$choice_index]}"
+      fi
+    done
+    log "选择订阅（回车保留当前订阅，可输入编号、名称或 ID）"
+    choose_value selected "订阅" "$default" "${subscription_choices[@]}"
+    SUBSCRIPTION="$selected"
+    for choice_index in "${!subscription_choices[@]}"; do
+      if [[ "${subscription_choices[$choice_index]}" == "$selected" ]]; then
+        SUBSCRIPTION="${subscription_ids[$choice_index]}"
+        break
+      fi
+    done
+  fi
+  az account set --subscription "$SUBSCRIPTION" || die "无法选择订阅 ${SUBSCRIPTION}"
+}
+
 deployment_options() {
   local regions groups
   local region_choices=() group_choices=()
   if ! { : </dev/tty; } 2>/dev/null; then
     die "无法交互选择部署选项，请加 -y"
   fi
+  if [[ -z "$SUBSCRIPTION" ]]; then select_subscription; fi
   if ! $SKIP_INFRA; then
     log "1/3 选择 region"
     regions="$(az functionapp list-flexconsumption-locations --query '[].name' -o tsv)" \

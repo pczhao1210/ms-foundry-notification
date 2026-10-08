@@ -21,6 +21,7 @@ def deploy(tmp_path):
     commands = {
         "az": """printf 'az %s\\n' "$*" >>"$CALL_LOG"
 case "$*" in
+    'account list'*) printf '%s\\n' "$MOCK_SUBSCRIPTIONS" ;;
     'account set'*) exit 0 ;;
     'group list'*) printf 'existing-group\\nother-group\\n' ;;
     'group show'*) printf '%s\\n' "${MOCK_GROUP_LOCATION:-}" ;;
@@ -59,6 +60,7 @@ fi
         env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "CALL_LOG": str(log),
                "AZURE_SUBSCRIPTION_ID": "", "AZURE_LOCATION": "eastus2",
                "AZURE_ENV_NAME": "", "AZURE_RESOURCE_GROUP": "", "AZURE_RESOURCE_NAME_PREFIX": "",
+               "MOCK_SUBSCRIPTIONS": '[{"name":"Offline review","id":"offline-review"}]',
                "MOCK_FUNCTIONS": "\n".join(f"review-app/{name}" for name in FUNCTIONS), **overrides}
         environment_args = ["-e", environment] if environment is not None else []
         command = ["bash", str(ROOT / "deploy.sh"), *environment_args, *args]
@@ -215,3 +217,69 @@ def test_invalid_resource_options_fail_before_deployment(deploy, args):
     result, calls = deploy("--what-if", *args)
     assert result.returncode != 0
     assert not any(call.startswith("az deployment sub") for call in calls)
+
+
+@pytest.mark.parametrize("answer, selected", [("2", "offline-other"), ("", "offline-review"),
+                                             ("offline-other", "offline-other")])
+def test_multiple_subscriptions_are_selected_before_regions(deploy, answer, selected):
+    result, calls = deploy("--skip-code", answers=[answer, "", "", "", "y"],
+                           MOCK_SUBSCRIPTIONS='[{"name":"Same name","id":"offline-review"},'
+                                              '{"name":"Same name","id":"offline-other"}]')
+    assert result.returncode == 0, result.stderr
+    account_set = calls.index(f"az account set --subscription {selected}")
+    regions = next(index for index, call in enumerate(calls) if call.startswith("az functionapp list-flex"))
+    groups = next(index for index, call in enumerate(calls) if call.startswith("az group list"))
+    assert account_set < regions < groups
+    assert result.stdout.index("选择订阅") < result.stdout.index("1/3")
+    assert "Same name (offline-review)" in result.stdout and "Same name (offline-other)" in result.stdout
+
+
+def test_single_subscription_does_not_prompt(deploy):
+    result, calls = deploy("--skip-code", answers=["", "", "", "y"])
+    assert result.returncode == 0, result.stderr
+    assert "使用唯一可用订阅" in result.stdout
+    assert "订阅 [" not in result.stdout
+    assert "az account set --subscription offline-review" in calls
+
+
+def test_default_subscription_is_current_not_first_in_list(deploy):
+    result, calls = deploy("--skip-code", answers=["", "", "", "", "y"],
+                           MOCK_SUBSCRIPTIONS='[{"name":"Other","id":"offline-other"},'
+                                              '{"name":"Current","id":"offline-review"}]')
+    assert result.returncode == 0, result.stderr
+    assert "订阅 [Current (offline-review)]" in result.stdout
+    assert "az account set --subscription offline-review" in calls
+
+
+def test_code_only_deployment_selects_subscription_before_reading_outputs(deploy):
+    result, calls = deploy("--skip-infra", answers=["2", "y"],
+                           MOCK_SUBSCRIPTIONS='[{"name":"Current","id":"offline-review"},'
+                                              '{"name":"Other","id":"offline-other"}]')
+    assert result.returncode == 0, result.stderr
+    selected = calls.index("az account set --subscription offline-other")
+    outputs = next(index for index, call in enumerate(calls) if call.startswith("az deployment sub show"))
+    assert selected < outputs
+    assert "1/3" not in result.stdout
+
+
+@pytest.mark.parametrize("args, overrides", [(("-s", "offline-other"), {}),
+                                           ((), {"AZURE_SUBSCRIPTION_ID": "offline-other"})])
+def test_explicit_subscription_skips_subscription_prompt(deploy, args, overrides):
+    result, calls = deploy("--skip-code", *args, answers=["", "", "", "y"], **overrides)
+    assert result.returncode == 0, result.stderr
+    assert "az account set --subscription offline-other" in calls
+    assert not any(call.startswith("az account list") for call in calls)
+
+
+@pytest.mark.parametrize("args", [("--what-if",), ("--skip-code", "-y")])
+def test_noninteractive_modes_do_not_list_subscriptions(deploy, args):
+    result, calls = deploy(*args)
+    assert result.returncode == 0, result.stderr
+    assert not any(call.startswith("az account list") for call in calls)
+
+
+def test_no_enabled_subscription_stops_before_region_selection(deploy):
+    result, calls = deploy("--skip-code", answers=[], MOCK_SUBSCRIPTIONS="[]")
+    assert result.returncode != 0
+    assert "没有可用订阅" in result.stderr
+    assert not any(call.startswith("az functionapp list-flex") for call in calls)
