@@ -4,222 +4,39 @@
 
 Automatically track daily Microsoft Foundry model lifecycle changes (Preview -> GA, new models, removal/retirement, replacements, and automatic upgrades) and **API retail price changes**, available through a **REST API** and an **MCP Server** for LLMs and agents.
 
-## REST API
+## Usage
 
-All endpoints require a Function Key in the `x-functions-key` header.
+Query today's changes, the past or next N days, the model catalog, and current prices through REST or six read-only MCP tools. Both interfaces use the `x-functions-key` header.
 
-| Endpoint | Description |
-|---|---|
-| `GET /api/changes/today?category=lifecycle\|price&billing=token\|provisioned` | Today's changes |
-| `GET /api/changes/upcoming?days=7&billing=` | Scheduled changes in the next N days (N <= 30) |
-| `GET /api/changes/past?days=7&category=&billing=` | Changes in the past N days (N <= 30) |
-| `GET /api/models?vendor=&status=&region=&billing=&name_contains=` | Current model catalog |
-| `GET /api/models/{format}/{name}?version=` | Details for a single model |
-| `GET /api/prices?model=&region=&deployment=` | Current retail prices (USD / 1M tokens) |
+See [API and MCP](docs/api.md) for endpoints, client configuration, keys, pagination, and collection status.
 
-All three change endpoints and their corresponding MCP tools support `limit` (1-1000, default 200) and `cursor`. Pass the response's `next_cursor` unchanged into the next request, keeping the same filters, until `next_cursor=null`. `total_events` / `summary` describe the entire window. If a data update or date rollover invalidates the cursor, restart without a cursor.
+## Quick Start
 
-Change responses default to a 64 KiB UTF-8 JSON budget, configurable with `max_bytes` (16384-1048576; excludes the MCP protocol envelope). Large price event details are split into fragments: merge `changes` by event ID and `changes_offset` until you reach `changes_total`. Do not deduplicate by event ID alone. `byte_limited=true` indicates that the page reached its byte budget. If an indivisible item still exceeds the budget, the request returns an error asking you to increase it.
+Requires subscription-level **Owner**, or Contributor + User Access Administrator.
 
-Every successful query response includes `collection`. `complete=false` means a relevant source is not yet collected, failed, degraded, or stale; it must not be interpreted as "no changes." `sources` includes `last_attempt_at`, `last_success_at`, `snapshot_at`, and failed or stale regions. Collection status is cached for up to 15 seconds and catalog snapshots for up to 10 minutes; a catalog served from an outdated cache is marked stale. This field describes current collection health, not the completeness of historical backfills.
-
-When the pricing API publishes prices with future effective dates, the change endpoints expose corresponding scheduled events. The current-price endpoint does not return those prices before they take effect. Future-price coverage depends on upstream publication and is not guaranteed.
-
-```bash
-curl -H "x-functions-key: $FOUNDRY_API_KEY" "https://<app-host>/api/changes/upcoming?days=7"
-```
-
-## MCP Server
-
-- Endpoint: `https://<app-host>/runtime/webhooks/mcp` (Streamable HTTP)
-- Authentication: header `x-functions-key: <mcp_extension system key>`
-- Tools: `get_today_changes`, `get_upcoming_changes`, `get_past_changes`, `search_models`, `get_model`, `get_model_prices`
-
-VS Code / GitHub Copilot (`.vscode/mcp.json`; enter the key at runtime rather than storing it on disk):
-
-```json
-{
-  "inputs": [
-    { "type": "promptString", "id": "foundry-host", "description": "Function App host name, e.g. xxx.azurewebsites.net" },
-    { "type": "promptString", "id": "foundry-mcp-key", "description": "mcp_extension system key", "password": true }
-  ],
-  "servers": {
-    "foundry-models": {
-      "type": "http",
-      "url": "https://${input:foundry-host}/runtime/webhooks/mcp",
-      "headers": { "x-functions-key": "${input:foundry-mcp-key}" }
-    }
-  }
-}
-```
-
-## Get Keys
-
-```bash
-# REST: create a separately named key for each client (individually revocable)
-az functionapp keys set -g <rg> -n <app> --key-type functionKeys --key-name <client>
-# MCP
-az functionapp keys list -g <rg> -n <app> --query systemKeys.mcp_extension -o tsv
-```
-
-## Runtime and Deployment
-
-- Sources: Azure Resource Manager Models API (primary), the official [Model retirement schedule](https://learn.microsoft.com/azure/foundry/openai/concepts/model-retirement-schedule) (supplementary), and the [Azure Retail Prices API](https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-retail-prices) (retail list prices; excludes Marketplace models such as Anthropic).
-- Runtime: Azure Functions Flex Consumption (Python), daily at 08:00 Asia/Shanghai.
-- Deployment: run `deploy.sh` in Azure Cloud Shell, or use `azd up` (both share `infra/main.bicep`). Script help, wizard prompts, logs, errors, and the completion summary are bilingual in Chinese and English.
-
-### Option 1: One-Command Deployment in Azure Cloud Shell
-
-Open [Azure Cloud Shell](https://shell.azure.com), select **Bash**, and run (no tools to install):
+Open [Azure Cloud Shell](https://shell.azure.com), select **Bash**, and run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/main/deploy.sh | bash
 ```
 
-By default, subscription selection precedes a four-step deployment wizard. Press Enter at each step to keep its default.
-If several subscriptions are Enabled, the script lists their names and IDs. Enter a number, name, or ID; Enter keeps the current subscription. A single enabled subscription is selected automatically. Setting `-s/--subscription` or `AZURE_SUBSCRIPTION_ID` skips this step. Use a number or ID to distinguish subscriptions with duplicate names.
+The bilingual wizard prompts for subscription, region, resource group, resource prefix, and UTC schedule. The Azure Functions app collects daily at 08:00 Asia/Shanghai by default; data becomes available after the first successful collection.
 
-1. Select a region: choose a number or name from regions supporting Flex Consumption; default `eastus2`.
-2. Select a resource group: choose a number, an existing name, or a new name in the current subscription; default `rg-foundry-notify`. Existing groups retain their location; resources deploy to the selected region.
-3. Enter a resource name prefix: default `foundry-notify`.
-4. Confirm the UTC schedule: enter a six-field NCRONTAB; default `0 0 0 * * *` (daily at 08:00 Asia/Shanghai). Deployment starts only after final confirmation.
+Alternatively, clone the repository and run `azd auth login` followed by `azd up`.
 
-`-e <env>` changes the environment name, default resource group, and wizard's default prefix; the environment defaults to `foundry-notify`. Preset individual steps with `-l`, `-g/--resource-group`, `--resource-prefix`, and `--schedule`, or their respective environment variables: `AZURE_LOCATION`, `AZURE_RESOURCE_GROUP`, `AZURE_RESOURCE_NAME_PREFIX`, and `DAILY_COLLECT_SCHEDULE`.
+See [Deployment and Operations](docs/deployment.md) for deployment options, scheduling, monitoring, and troubleshooting.
 
-The script downloads this repository's `infra/` and `src/` into a temporary directory, deploys them, and cleans up automatically. Common variations (script arguments follow `bash -s --`):
+## Documentation
 
-```bash
-URL=https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/main/deploy.sh
-curl -fsSL $URL | bash -s -- -e prod --what-if            # Preview infrastructure changes only
-curl -fsSL $URL | bash -s -- -e prod -g rg-prod --resource-prefix prod -y  # Noninteractive deployment
-curl -fsSL $URL | bash -s -- -e prod --skip-infra -y      # Update code only after deployment
-curl -fsSL $URL | bash -s -- -e prod -r <tag-or-commit>   # Deploy a specific version (default: main)
-curl -fsSL $URL | bash -s -- -h                           # All options
-```
+| Guide | Contents |
+|---|---|
+| [API and MCP](docs/api.md) | REST endpoints, MCP configuration, authentication, pagination |
+| [Deployment and Operations](docs/deployment.md) | Deployment options, schedules, collection health, troubleshooting, alerts |
+| [Development](docs/development.md) | Local setup, Azurite, testing, debugging, CI |
+| [Design](docs/plan.md) | Data sources, architecture, event semantics, limitations |
+| [Contributing](AGENTS.md) | Repository conventions |
 
-Alternatively, clone the repository and run the script. Running from the checkout without `-r` uses local files, allowing you to deploy local changes:
-
-```bash
-git clone https://github.com/pczhao1210/ms-foundry-notification.git
-cd ms-foundry-notification
-bash deploy.sh
-```
-
-Resource names retain a uniqueness suffix, for example `func-<prefix>-<token>`. Storage account names remove `-` from the prefix, use its first nine characters, and retain the full uniqueness suffix to fit the 24-character limit. Subsequent infrastructure deployments must use the same environment name, region, resource group, and prefix. Changing the resource group or prefix creates new resources without migrating data or deleting old resources. `-y` and `--what-if` skip subscription selection and the wizard, using the specified or current subscription. Noninteractive runs without an explicit prefix retain legacy hash-based naming. To preview wizard settings, explicitly pass `-g`, `--resource-prefix`, and any custom `--schedule`. `--skip-infra` still selects a subscription when needed, but skips the four configuration steps and reads the existing environment's deployment outputs in that subscription to update code.
-
-The script requires only `az`, `python3`, and `curl`, all included in Cloud Shell. It selects deployment options, resolves source files, deploys subscription-scoped Bicep, packages `src/`, publishes through `az functionapp deployment source config-zip --build-remote true` (Flex Consumption remote build), verifies registration of all 13 functions and 401 responses to unauthenticated REST/MCP requests, then prints endpoints and key-management commands without printing key values. Failed verification exits nonzero. You must still verify actual REST/MCP queries using client keys in your own terminal. `--what-if` neither registers providers nor deploys resources. Repeated runs with the same configuration are idempotent. Piped runs read wizard input and confirmation from `/dev/tty`; add `-y` when no terminal is available, such as in CI.
-
-Both deployment and `--what-if` retain default Provider validation. Deployment outputs are read as JSON through `az deployment sub show`. The script queries the Function App and publishes code only if the deployment state is `Succeeded` and both `AZURE_RESOURCE_GROUP` / `AZURE_FUNCTION_APP_NAME` are valid names. Output keys are uniquely matched case-insensitively, accepting ARM responses such as `azurE_RESOURCE_GROUP` / `azurE_FUNCTION_APP_NAME` without changing resource name values. Conflicting keys differing only in case cause an error. Logs distinguish deployment, output retrieval, and target resources. Missing or invalid outputs report only field names and types, not values; TSV's `None` is never treated as a resource name. Enter preserves the wizard's displayed default. If infrastructure succeeded and only output retrieval failed, resume with the updated script and `--skip-infra` in the same subscription and environment rather than redeploying infrastructure.
-
-The Function App hostname is also read as JSON through `az functionapp show -o json`, supporting both flattened CLI responses and ARM's `properties.defaultHostName`. The script uniquely matches case variants such as `defaultHostName` / `defaultHostname` only at the top level and inside `properties`, then validates the DNS name before publishing. It does not recursively search other objects. Missing, empty, duplicated, case-conflicting, or unreadable hostnames stop deployment; missing-field diagnostics list top-level and `properties` field names without values. The script never constructs `https:///api/...` or guesses the domain from the app name. If an older script reports `Could not resolve host: api`, or claims `defaultHostName` is missing when the response contains `properties`, inspect the response structure first. Once infrastructure has succeeded, the fixed script with `--skip-infra` can resume publication and verification without recreating infrastructure.
-
-`RoleAssignmentUpdateNotPermitted` means deployment tried to modify immutable fields of an existing role assignment, such as its principal or scope. The old template's subscription-level Reader assignment ID omitted `principalId`, so deleting and recreating a managed identity with the same name reused the old ID. IDs now derive from the subscription, actual `principalId`, and Reader role: rerunning with the same identity keeps the ID; a new identity gets a new assignment. Old assignments are not deleted automatically. Inspect the failed resource in the selected subscription to confirm whether this assignment caused the failure:
-
-```bash
-az deployment operation sub list --name foundry-notify-foundry-notify \
-  --query "[?properties.provisioningState=='Failed'].{resource:properties.targetResource.id,error:properties.statusMessage}" -o json
-```
-
-When migrating from the old template, the new naming may produce `RoleAssignmentExists` if **the same current identity** already has subscription-level Reader. After confirming that the existing assignment matches the `principalId`, subscription scope, and Reader role, set `AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME` to its **name (GUID, not the full resource ID)**. For azd, put the same GUID in `subscriptionReaderAssignmentName.value` in `infra/main.parameters.json`. Leave it empty for new environments or recreated identities; never reuse a conflicting assignment ID belonging to an old identity. Preserve this reuse setting in subsequent deployments, and do not bulk-delete subscription role assignments.
-
-If an infrastructure failure left the deployment record in `Failed`, complete infrastructure deployment again using the fixed template and the same subscription, environment, region, resource group, and prefix before publishing code. You cannot immediately use `--skip-infra`, which requires a `Succeeded` deployment.
-
-> `raw.githubusercontent.com` caches content for approximately five minutes, so newly pushed changes may take time to appear. Use `-r <commit>` for an exact source version.
-
-Required permissions: subscription-level **Owner**, or Contributor + User Access Administrator (to assign subscription-level Reader to the managed identity).
-
-### Option 2: azd
-
-```bash
-azd auth login
-azd up        # Prompts for environment name / subscription / region
-```
-
-The first collection runs at the next UTC 00:00 (08:00 Asia/Shanghai) by default. Until then, `/api/models` and `/api/prices` return 503 because no snapshots exist, while change endpoints return empty results with `collection.complete=false`. The first run backfills the last 30 days of documentation changes using Git history; ARM and price changes begin on the second day.
-
-Collection results are first saved as a pending batch. Snapshots are published only after events and schedules are written successfully. If a write is interrupted, the next run resumes the batch with its original date before collecting again. Do not manually trigger parallel collections for the same source. ARM regional failures retain each affected region's most recent successful data and mark the run degraded; other sources continue. An empty catalog is not treated as removal of all models. If valid data is saved but some regions are missing, the report records `degraded` and logs a WARNING; the portal invocation is marked successful, but REST/MCP still return `collection.complete=false`. Actual collection, commit, or status-write failures record `failed` and fail the invocation. Generated files do not prove every step succeeded; inspect `daily run report` and exceptions in Application Insights.
-
-Latest snapshots are read through a lightweight index. Older storage layouts gain an index automatically after the next successful collection. Per-source reports are stored in the snapshots container at `status/{kind}.json.gz` and `runs/YYYY-MM-DD/{kind}.json.gz`; daily reports retain the day's last attempt.
-
-### Collection Schedule (UTC)
-
-Running `bash deploy.sh` prompts for the UTC schedule after the resource prefix; `--schedule` is not required. Enter keeps `0 0 0 * * *`, daily at UTC 00:00 / 08:00 Asia/Shanghai. Use a six-field NCRONTAB (second, minute, hour, day, month, weekday) without quotes in the wizard. You can preset this step with `--schedule`; quote the expression on the command line. For example, daily at UTC 01:30 / 09:30 Asia/Shanghai:
-
-```bash
-bash deploy.sh -e <env> --schedule '0 30 1 * * *'
-```
-
-One-command deployment also supports `--schedule '0 30 1 * * *'` after `bash -s --`. Alternatively, set `DAILY_COLLECT_SCHEDULE`; the command-line argument takes precedence. The script checks the six-field format, while Azure Functions validates the expression's values. For azd, edit `dailyCollectSchedule.value` in `infra/main.parameters.json` before deploying; the default is the same.
-
-The schedule is stored in the Function App setting `DAILY_COLLECT_SCHEDULE`, referenced by the Timer as `%DAILY_COLLECT_SCHEDULE%`. Existing environments need both infrastructure and code deployment when first upgrading to this setting; `--skip-infra` alone is insufficient. Later schedule-only updates can use `--skip-code --schedule '...'`, or edit and apply the setting in the portal under Settings > Environment variables > App settings. Changing app settings normally restarts the app. An explicit schedule cannot be combined with `--skip-infra`. Infrastructure deployment without a schedule override restores the default, so pass the schedule you want to preserve on subsequent deployments.
-
-Flex Consumption does not support `WEBSITE_TIME_ZONE` / `TZ`; do not add those settings. Schedule expressions always use UTC. Event query day boundaries still use Asia/Shanghai. Collection health alerts retain a 32-hour inactivity threshold; adjust the alert design if you configure less frequent collection.
-
-### Manual Runs and Portal Troubleshooting
-
-In the Azure portal, open the Function App > Functions > `daily_collect` > Code + Test > Test/Run. Select `_master` in the key dropdown, use `{"input":""}` as the request body, and run once. This calls the `/admin/functions/daily_collect` admin endpoint; ordinary host keys and `mcp_extension` do not apply. Select the key only in the portal; never copy, distribute, or log its value. HTTP 202 means only that the request was accepted. Check monitoring/invocation records for the final result, and do not trigger parallel runs.
-
-`HTTP 0` / `Failed to fetch` in the portal means the browser did not receive a readable HTTP response. It does not by itself prove collection failed or the key was wrong. Check invocation records first to avoid resubmitting an already accepted request, then inspect browser developer tools for CORS, DNS/TLS, proxy, or access-restriction errors. The template allows only the CORS origin `https://portal.azure.com`, without wildcards and with `supportCredentials=false`; Function Key authentication remains required. For older deployments, inspect and add the portal origin in Cloud Shell under the original subscription without republishing code:
-
-```bash
-az functionapp cors show -g <resource-group> -n <function-app>
-az functionapp cors add -g <resource-group> -n <function-app> \
-  --allowed-origins https://portal.azure.com -o none
-```
-
-After saving, refresh the portal and test again. If errors persist, share only network diagnostics with keys and sensitive headers removed. Do not disable authentication or add a `*` origin for troubleshooting.
-
-### Optional Collection Alerts
-
-After the first successful collection, run `bash deploy.sh -e <env> --skip-code --enable-alerts` to enable collection health alerts. For azd, set `enableCollectionAlerts.value` to true in `infra/main.parameters.json` and provision again. The rule checks hourly for recent collection failures or more than 32 hours without a completed invocation. It is disabled by default and may incur Azure Monitor charges when enabled.
-
-The rule does not alert on successful but degraded invocations with missing regions. Use the response's `collection` field to assess completeness; missing regions also appear in `daily arm step degraded` WARNING logs.
-
-Attach an Action Group in the Azure portal or provide existing groups through the Bicep parameter `alertActionGroupIds`. Without one, alerts are recorded but no notifications are sent. Real telemetry and notification delivery still require cloud validation.
-
-## Local Development
-
-```bash
-python -m venv .venv && . .venv/bin/activate
-python -m pip install -r src/requirements.txt -r requirements-dev.txt
-python -m pytest -q          # Offline unit tests; no network/Azure access
-```
-
-Runtime, transitive, and test dependencies are pinned to versions verified on Linux/Python 3.12. When upgrading, resolve the complete dependency set again and run the tests. GitHub Actions runs dependency consistency checks, offline tests, deployment script syntax checks, and Bicep compilation on pushes and pull requests. It does not deploy automatically or require Azure keys.
-
-Running Functions locally requires Node.js, `az login` (Azure CLI credentials for ARM collection), and `src/local.settings.json` (git-ignored; do not commit). Storage defaults to the local Azurite emulator:
-
-```json
-{
-  "IsEncrypted": false,
-  "Values": {
-    "FUNCTIONS_WORKER_RUNTIME": "python",
-    "DAILY_COLLECT_SCHEDULE": "0 0 0 * * *",
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "STORAGE_USE_EMULATOR": "true",
-    "AZURE_TOKEN_CREDENTIALS": "AzureCliCredential",
-    "FOUNDRY_REGIONS": "eastus2,swedencentral"
-  }
-}
-```
-
-```bash
-npm install -g azurite azure-functions-core-tools@4
-azurite --silent --skipApiVersionCheck --location /tmp/azurite &      # blob 10000 / queue 10001 / table 10002
-cd src && source ../.venv/bin/activate
-export FOUNDRY_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"  # Do not write to a file
-func start
-# In another terminal: trigger collection once, then query the API
-curl -X POST -H "Content-Type: application/json" -d '{"input":""}' http://localhost:7071/admin/functions/daily_collect
-curl "http://localhost:7071/api/changes/past?days=7"
-```
-
-- `STORAGE_USE_EMULATOR=true` uses Azurite's public development account and automatically creates containers and tables. To connect to Azure Storage, remove this setting and configure `STORAGE_BLOB_ENDPOINT` / `STORAGE_TABLE_ENDPOINT` from `azd env get-values`. Your local account needs Blob/Table Data Contributor roles; azd grants them using `AZURE_PRINCIPAL_ID`.
-- `AZURE_TOKEN_CREDENTIALS=AzureCliCredential` forces `az login` credentials, avoiding accidental use of an Azure VM's managed identity. Use `FOUNDRY_REGIONS` to restrict regions and speed up debugging.
-- If libicu is unavailable and Core Tools reports `Couldn't find a valid ICU package`, first run `export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`.
-- Local `func start` does not validate Function Keys. Editing `function_app.py` restarts the host and interrupts running collection; changes to `core/` and other modules require a manual host restart.
-
-> Status: code and IaC are implemented and verified offline; deployment in a real environment has not yet been validated. See [docs/plan.md](docs/plan.md) for the design and [AGENTS.md](AGENTS.md) for development conventions.
+> Status: code and IaC are implemented and verified offline; deployment in a real environment has not yet been validated.
 
 ## License
 

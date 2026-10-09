@@ -88,7 +88,7 @@ MCP Server（Functions MCP 扩展，Streamable HTTP，system key `mcp_extension`
 - 所有查询成功响应均带 `collection`：`date` / `timezone`、`complete` 及按来源的 `status`（unknown/collecting/complete/degraded/failed/stale）、`last_attempt_at` / `last_success_at` / `snapshot_at`、`stale_regions` / `failed_regions`。状态缺失、当日未完成或缓存快照落后于已发布版本时 `complete=false`，不能解读为“没有变化”。变化查询按类别只检查对应来源；模型查询检查 ARM，当前价格查询检查 prices。此状态描述当前采集覆盖度，不保证整个历史窗口完整；docs 历史回填失败仍为 best-effort，不影响当天源采集成功。
 - 只读工具；不提供任何写操作或触发采集的工具。
 
-VS Code 客户端配置示例见 README。
+VS Code 客户端配置示例见 [API 与 MCP](api.zh-CN.md)。
 
 ## 3.3 价格变化（2026-10-06 调研，实测）
 数据源：Azure Retail Prices API `GET https://prices.azure.com/api/retail/prices?$filter=serviceName eq 'Foundry Models'`（公开、免认证）
