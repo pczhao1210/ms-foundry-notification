@@ -36,8 +36,6 @@ See [Deployment and Operations](docs/deployment.md) for deployment options, sche
 | [Design](docs/plan.md) | Data sources, architecture, event semantics, limitations |
 | [Contributing](AGENTS.md) | Repository conventions |
 
-> Status: code and IaC are implemented and verified offline; deployment in a real environment has not yet been validated.
-
 ## License
 
 [MIT](LICENSE)

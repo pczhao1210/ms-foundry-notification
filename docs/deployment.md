@@ -115,4 +115,4 @@ After the first successful collection, run `bash deploy.sh -e <env> --skip-code 
 
 The rule does not alert on successful but degraded invocations with missing regions. Use the response's `collection` field to assess completeness; missing regions also appear in `daily arm step degraded` WARNING logs.
 
-Attach an Action Group in the Azure portal or provide existing groups through the Bicep parameter `alertActionGroupIds`. Without one, alerts are recorded but no notifications are sent. Real telemetry and notification delivery still require cloud validation.
+Attach an Action Group in the Azure portal or provide existing groups through the Bicep parameter `alertActionGroupIds`. Without one, alerts are recorded but no notifications are sent.

@@ -36,8 +36,6 @@ curl -fsSL https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/
 | [项目设计](docs/plan.md) | 数据源、架构、事件语义与局限 |
 | [贡献约定](AGENTS.md) | 仓库开发规范 |
 
-> 状态：代码与 IaC 已完成并离线验证，尚未在真实环境部署验证。
-
 ## License
 
 [MIT](LICENSE)

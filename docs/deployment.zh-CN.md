@@ -115,4 +115,4 @@ az functionapp cors add -g <resource-group> -n <function-app> \
 
 此规则不对成功执行但部分区域缺失的降级调用告警；数据完整性以响应中的 `collection` 为准，缺失区域也会记录在 `daily arm step degraded` WARNING 日志中。
 
-通知接收方需在 Azure 门户绑定 Action Group，或通过 Bicep 参数 `alertActionGroupIds` 指定已有组；未配置时只有告警记录，不发送通知。真实遥测与告警投递仍需云端验证。
+通知接收方需在 Azure 门户绑定 Action Group，或通过 Bicep 参数 `alertActionGroupIds` 指定已有组；未配置时只有告警记录，不发送通知。

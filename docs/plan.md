@@ -65,7 +65,7 @@ MCP Server（Functions MCP 扩展，Streamable HTTP，system key `mcp_extension`
 - 密钥只通过 `az functionapp keys list/set` 获取，不写入仓库、不在 azd 输出中打印；文档只给出获取命令。
 - 平台约束：HTTPS only、TLS ≥ 1.2、`ftpsState=Disabled`、禁用 basic publishing credentials。
 - 门户手动测试：`siteConfig.cors.allowedOrigins` 仅包含 `https://portal.azure.com`，`supportCredentials=false`，不允许通配符。跨域白名单只支持门户浏览器调用，不绕过密钥认证；手动触发 `daily_collect` 的 `/admin/functions/` 管理端点仍需在门户选择 `_master`，不得分发或输出密钥值。REST/MCP 只读查询不提供触发采集的能力。
-- `HTTP 0` / `Failed to fetch` 不是函数返回的 HTTP 状态，可能由 CORS、客户端 DNS/TLS、代理或访问限制导致。缺少门户 CORS 是模板可修复的原因，但现场根因仍需网络请求确认；先检查是否已有调用记录，不盲目重复触发。旧部署可通过 `az functionapp cors add --allowed-origins https://portal.azure.com` 补充白名单，不必重发代码；HTTP 202 只表示接受请求，采集结果以调用记录为准。离线编译测试校验精确来源和凭据开关，云端浏览器行为仍需实测。
+- `HTTP 0` / `Failed to fetch` 不是函数返回的 HTTP 状态，可能由 CORS、客户端 DNS/TLS、代理或访问限制导致。先检查是否已有调用记录，再检查浏览器网络请求，不盲目重复触发。旧部署可通过 `az functionapp cors add --allowed-origins https://portal.azure.com` 补充白名单，不必重发代码；HTTP 202 只表示接受请求，采集结果以调用记录为准。
 - 本地 `func start` 不校验 key（Functions 本地行为），本地测试无需 key。
 - 升级路径（若日后具备 Entra 权限）：开启 Easy Auth + `WEBSITE_AUTH_PRM_DEFAULT_WITH_SCOPES` 实现 MCP OAuth；或前置 APIM 做 key/OAuth/限流。
 
@@ -213,13 +213,13 @@ Bicep 契约（两种方式都依赖，修改时须同步）：
 
 `deploy.sh` 流程：参数校验 → 获取源码（脚本位于仓库 checkout 且未指定 `-r/--ref` 时用本地文件；否则（如 `curl | bash`）下载 `github.com/<DEPLOY_REPO>/archive/<ref>.tar.gz` 到临时目录，ref 默认 `main`）→ 订阅 RBAC 权限预检（仅告警）→ 注册资源提供程序（`--what-if` 只检查状态，不注册）→ 校验区域支持 Flex（`az functionapp list-flexconsumption-locations`）→ `az deployment sub create`（`--what-if` 仅预览）→ 读取部署输出 → 打包 `src/`（排除 `.venv`/`__pycache__`/`local.settings.json`/`tests`）→ `az functionapp deployment source config-zip --build-remote true`（Python 在 Flex 上必须远程构建）→ 等待完整 13 个函数注册 → 无 key 的 REST GET 与 MCP initialize POST 均须返回 401 → 打印端点与取 key 命令（**不打印密钥值**）。注册超时、任何端点鉴权不符或请求失败均非零退出，不输出部署完成。HTTP 探测设置连接及总时限；不获取任何密钥。部署名固定为 `foundry-notify-<env>`，重复执行幂等；`--skip-infra` 仅发布代码。脚本主流程包在 `main()` 中、末行调用（管道下载中断不会执行半截脚本）；确认提示从 `/dev/tty` 读取，无终端时须加 `-y`。
 
-部署输出校验（2026-10-08）：正式部署与预览均使用默认 Provider 检查，资源组仍由 Bicep 管理，不提前执行 `az group create`。已确认此次故障由输出键大小写差异触发：状态为 `Succeeded`，原始 ARM GET 返回 `azurE_RESOURCE_GROUP` / `azurE_FUNCTION_APP_NAME`，值均有效；全大写精确查找错误地判定字段缺失，旧 TSV 查询又把 null 转成 `None` 并当作资源名使用。不是向导回车丢失默认值；`--validation-level Template` 与切换 `az rest` 均不是所需修复，已撤销。`read_outputs` 保留 `az deployment sub show` 的 JSON 查询，读取 `properties.provisioningState` 和 `properties.outputs`，要求状态为 `Succeeded`；对两个必需输出键按 `casefold()` 唯一匹配，零匹配或多个大小写同名匹配均报错，不改写资源名称值。值须为非空且不含空白的字符串，拒绝 JSON null、缺失字段以及字面量 `None` / `null`。失败诊断只报告字段名及类型，不打印字段值，不查询 Function App、不发布代码；读取 CLI 的错误不隐藏。离线测试覆盖本地脚本与管道输入下的回车默认值、全大写/实际混合大小写/小写输出、大小写冲突、读取失败、无效输出、未成功部署及诊断不泄露值。基础设施成功后可通过 `--skip-infra` 在同一订阅与环境重试发布。Bicep 的全大写输出契约及 azd 调用方式不变；造成服务端键名大小写变化的具体环节未进一步归因。
+部署输出校验：正式部署与预览均使用默认 Provider 检查，资源组由 Bicep 管理，不提前执行 `az group create`。`read_outputs` 使用 `az deployment sub show` 的 JSON 查询，读取 `properties.provisioningState` 和 `properties.outputs`，要求状态为 `Succeeded`；对两个必需输出键按 `casefold()` 唯一匹配，兼容 `azurE_RESOURCE_GROUP` / `azurE_FUNCTION_APP_NAME` 等大小写变体，零匹配或多个大小写同名匹配均报错，不改写资源名称值。值须为非空且不含空白的字符串，拒绝 JSON null、缺失字段以及字面量 `None` / `null`。失败诊断只报告字段名及类型，不打印字段值，不查询 Function App、不发布代码；读取 CLI 的错误不隐藏。基础设施成功后可通过 `--skip-infra` 在同一订阅与环境重试发布。Bicep 的全大写输出契约及 azd 调用方式不变。
 
-Function App 主机名校验（2026-10-08）：旧 `--query defaultHostName -o tsv` 返回空值时，验收 URL 会变成 `https:///api/...`，curl 将 `api` 作为主机名解析。`read_outputs` 改为读取 `az functionapp show -o json`，兼容 CLI 扁平结构与 ARM 原始资源结构；现场日志已显示顶层包含 `properties` 而没有主机名，仅兼容字段大小写仍不足。解析仅在顶层及对象类型的 `properties` 中对 `defaultHostName` / `defaultHostname` 等字段大小写变体进行 `casefold()` 唯一匹配，不递归搜索 `siteConfig` 等其他对象；跨层重复或大小写冲突均拒绝。值必须是至少两段的 DNS 名称，每段 1-63 个 ASCII 字母/数字/连字符且首尾为字母或数字，总长不超过 253。缺失、冲突、非字符串、空值、非法 DNS 名称及 CLI 读取失败均在发布与验收前停止，缺失诊断分别列出顶层和 `properties` 的字段名，不打印字段值；有效主机名记录到日志，REST/MCP 探测与最终摘要共用该值，不根据应用名拼接或猜测域名。离线测试默认模拟 ARM 嵌套响应，同时覆盖顶层/嵌套字段的大小写、完整 URL、无效属性结构、跨层重复、读取失败、本地与管道执行；单元测试不访问 Azure。验收仍要求全部 13 个函数注册，REST/MCP 无 key 均返回 401。
+Function App 主机名校验：`read_outputs` 读取 `az functionapp show -o json`，兼容 CLI 扁平结构与 ARM 原始资源结构。解析仅在顶层及对象类型的 `properties` 中对 `defaultHostName` / `defaultHostname` 等字段大小写变体进行 `casefold()` 唯一匹配，不递归搜索 `siteConfig` 等其他对象；跨层重复或大小写冲突均拒绝。值必须是至少两段的 DNS 名称，每段 1-63 个 ASCII 字母/数字/连字符且首尾为字母或数字，总长不超过 253。缺失、冲突、非字符串、空值、非法 DNS 名称及 CLI 读取失败均在发布与验收前停止，缺失诊断分别列出顶层和 `properties` 的字段名，不打印字段值；有效主机名记录到日志，REST/MCP 探测与最终摘要共用该值，不根据应用名拼接或猜测域名。验收要求全部 13 个函数注册，REST/MCP 无 key 均返回 401。
 
-订阅 Reader 幂等性（2026-10-08）：角色分配的主体与作用域不可更新。旧分配 ID 只依赖环境/区域/组名/资源前缀，未包含实际主体；同名 UAMI 重建后 `principalId` 改变，仍更新旧分配会触发 `RoleAssignmentUpdateNotPermitted`。Reader 改放入 `targetScope = subscription` 的 `subscription_rbac.bicep` 模块，接收身份模块的 `principalId`，默认使用 `guid(subscription().id, identityPrincipalId, readerRoleId)`；模块边界使身份创建后的输出可作为内部资源名的计算输入。模块部署名带资源后缀，避免不同环境共用订阅级部署名。相同主体重跑确定性不变，新主体获得新 ID，不删除旧授权。已有成功部署迁移时，同一主体/作用域/角色的重复授权可能触发 `RoleAssignmentExists`，须确认匹配后显式设置上述复用参数，并在后续部署保留该值；不自动寻找或删除分配。存储/监控已有的 principal-based 命名不变，权限仍仅为订阅 Reader。离线测试编译并解析 ARM JSON，断言身份输出传递、分配 GUID 输入、Reader 权限及复用参数；CI 在 pytest 前安装固定版本 Bicep，本地缺少编译器时仅跳过该编译契约测试。云端具体冲突仍需 deployment operations 确认；失败记录未恢复为 `Succeeded` 前，不能依靠 `--skip-infra` 跳过本次基础设施故障。
+订阅 Reader 幂等性：角色分配的主体与作用域不可更新，更新旧分配的主体会触发 `RoleAssignmentUpdateNotPermitted`。Reader 在 `targetScope = subscription` 的 `subscription_rbac.bicep` 模块中定义，接收身份模块的 `principalId`，默认使用 `guid(subscription().id, identityPrincipalId, readerRoleId)`；模块边界使身份创建后的输出可作为内部资源名的计算输入。模块部署名带资源后缀，避免不同环境共用订阅级部署名。相同主体重跑确定性不变，新主体获得新 ID，不删除旧授权。已有成功部署迁移时，同一主体/作用域/角色的重复授权可能触发 `RoleAssignmentExists`，须确认匹配后显式设置上述复用参数，并在后续部署保留该值；不自动寻找或删除分配。存储/监控使用 principal-based 命名，权限仍仅为订阅 Reader。遇到冲突时通过 deployment operations 确认具体失败资源；失败记录未恢复为 `Succeeded` 前，不能依靠 `--skip-infra` 跳过基础设施故障。
 
-采集告警（显式启用）：建议首次采集成功后设置 `enableCollectionAlerts=true`；脚本支持 `--enable-alerts`（不能与 `--skip-infra` 同用），azd 可在 `infra/main.parameters.json` 中设置布尔值。每小时查询专用 Log Analytics workspace 的 AppRequests，最近一次 daily_collect 失败或 32 小时内没有完成调用时触发 severity 2 告警；成功后自动恢复。Request 遥测未采样，窗口 48 小时。规则可能产生 Azure Monitor 费用，默认不创建；通知需在门户配置 Action Group 或通过 `alertActionGroupIds` 指定已有组，无接收组时只生成告警记录。云端须验证实际遥测表、函数名称及通知投递。
+采集告警（显式启用）：建议首次采集成功后设置 `enableCollectionAlerts=true`；脚本支持 `--enable-alerts`（不能与 `--skip-infra` 同用），azd 可在 `infra/main.parameters.json` 中设置布尔值。每小时查询专用 Log Analytics workspace 的 AppRequests，最近一次 daily_collect 失败或 32 小时内没有完成调用时触发 severity 2 告警；成功后自动恢复。Request 遥测未采样，窗口 48 小时。规则可能产生 Azure Monitor 费用，默认不创建；通知需在门户配置 Action Group 或通过 `alertActionGroupIds` 指定已有组，无接收组时只生成告警记录。
 
 仅部分区域缺失的降级调用属于成功执行，不触发上述基于 AppRequests 的失败告警；数据覆盖度需查看查询响应的 `collection` 和 `daily arm step degraded` WARNING 日志。
 
@@ -229,23 +229,16 @@ Function App 主机名校验（2026-10-08）：旧 `--query defaultHostName -o t
 1. 无法"预测"未来新模型上线——API 不暴露未发布模型；未来 7 天只含已知日期事件。
 2. Models API 是订阅视角：受限/门控模型、或已 Deprecated 对新订阅不可见的模型可能缺失 → 用文档交叉校验。
 3. Preview→GA 通常以"新 version"形式出现而非同版本状态翻转 → 增加按 model name 的 `NEW_VERSION`/GA 识别。
-4. ~~Fireworks 覆盖待验证~~ 已确认覆盖。快照基于单一订阅视角，建议部署订阅即监控订阅。
+4. 快照基于单一订阅视角，建议部署订阅即监控订阅。
 5. 文档与 API 可能有滞后/不一致 → 两源都保留，事件带 `source` 字段。
 6. Function Key 是共享密钥：泄露即可访问 → 每调用方独立命名 key、定期轮换；MCP 只能共用 `mcp_extension` 一个系统密钥，轮换需通知所有 MCP 客户端。数据本身为公开目录信息，风险可接受。
 7. Functions 无内置限流 → 依赖 Flex 实例上限（`maximumInstanceCount`）控制成本；需要时再前置 APIM。
-8. 本地已验证 `azure-functions` 1.25 可注册 `mcpToolTrigger`（Python 3.12）；extension bundle `[4.0.0, 5.0.0)` 是否包含 MCP 扩展、Flex 上 MCP 端点行为待首次部署验证（不满足时改用 Preview bundle）。
+8. MCP 端点依赖支持 `mcpToolTrigger` 的 Functions MCP 扩展与 extension bundle；仅使用 Streamable HTTP，保持 System 级鉴权。
 9. 价格计量名为非规范缩写且随模型代际变化（如 `5.4` → `5.6 sol` 新增 `ShortCo`/`Std`/`Cd Wr`）：解析失败只会退回逐计量输出（`unparsed=true`），不会给出错误维度；出现新的未解析名称时补词典 + fixture 回归测试。价格→ARM 模型映射依赖别名表，新模型上线初期可能 `mapped=false`。
 10. Anthropic 等 Marketplace 计费模型无公开价格 API，价格变化不覆盖（模型生命周期变化仍覆盖）。
 11. Retail Prices 发布滞后且月粒度，价格变化的"观测日"可能晚于实际生效日；事件同时记录 `observed_at` 与 `effectiveStartDate`。
 12. 文档 Git 历史回填使用未认证的 GitHub API（60 次/小时/IP），共享出口 IP 可能被限流；回填为 best-effort，失败只缺少首次部署前的文档历史。
 13. 部署关闭了 SCM basic auth：`deploy.sh` / azd 发布代码依赖 Entra 令牌部署（需较新版本 az CLI / azd）。
 
-## 6. 阶段
-- Phase 0 ✅：用真实订阅跑发现脚本，确认 `kind/format` 取值、region 数量、Fireworks 覆盖
-- Phase 1 ✅：collectors + normalize + diff + 文档解析 + 价格解析/映射 + 单元测试（本地可跑）
-- Phase 2 ✅（代码）：Function app（timer + 6 个 REST + 6 个 MCP 工具）+ Blob/Table 存储 + 文档 Git 历史回填；离线单元测试与故障注入回归覆盖提交恢复、同日重跑、空响应、分页及未来价格
-- Phase 3：Bicep/azd + `deploy.sh`
-  - 已完成：Bicep 模块（`bicep build` 无告警）、`azure.yaml`、`main.parameters.json`
-  - 已完成：部署脚本离线模拟测试（预览无写入、完整函数注册、REST/MCP 鉴权失败时非零退出）
-  - 待完成：Cloud Shell 实测一次部署；部署验证（无 key → 401；REST/MCP 端到端调用；首次 timer 运行与回填）
+## 6. 可选扩展
 - Phase 4（可选）：Azure Updates RSS 信号、推送通知、Anthropic 价格（解析文档）

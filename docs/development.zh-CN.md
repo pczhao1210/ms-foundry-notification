@@ -46,4 +46,4 @@ curl "http://localhost:7071/api/changes/past?days=7"
 - 系统缺少 libicu 时（Core Tools 报 `Couldn't find a valid ICU package`）先 `export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`
 - 本地 `func start` 不校验 Function Key；修改 `function_app.py` 会触发 host 重启并中断正在运行的采集，修改 `core/` 等其他模块需手动重启 host
 
-> 状态：代码与 IaC 已完成并离线验证，尚未在真实环境部署验证。详见 [项目设计](plan.md)，开发约定见 [AGENTS.md](../AGENTS.md)。
+项目设计见 [项目设计](plan.md)，开发约定见 [AGENTS.md](../AGENTS.md)。
