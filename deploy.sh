@@ -11,6 +11,9 @@ SUBSCRIPTION="${AZURE_SUBSCRIPTION_ID:-}"
 RESOURCE_GROUP_NAME="${AZURE_RESOURCE_GROUP:-}"
 RESOURCE_PREFIX="${AZURE_RESOURCE_NAME_PREFIX:-}"
 SUBSCRIPTION_READER_ASSIGNMENT_NAME="${AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME:-}"
+COLLECT_SCHEDULE="${DAILY_COLLECT_SCHEDULE-0 0 0 * * *}"
+SCHEDULE_SPECIFIED=false
+if [[ ${DAILY_COLLECT_SCHEDULE+x} ]]; then SCHEDULE_SPECIFIED=true; fi
 REF=""
 WHAT_IF=false
 SKIP_INFRA=false
@@ -23,7 +26,7 @@ usage() {
 用法: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/deploy.sh | bash -s -- [选项]
   bash deploy.sh [选项]
 
-默认先选择订阅（多个可用订阅时），再选择区域、资源组、资源名称前缀；回车保留默认。
+默认先选择订阅（多个可用订阅时），再选择区域、资源组、资源名称前缀、UTC 触发时间；回车保留默认。
 -s / AZURE_SUBSCRIPTION_ID 指定订阅时不再询问；-y / --what-if 跳过向导。
 
   -e, --env-name NAME       环境名（默认 foundry-notify，3-16 位小写字母/数字/-），也可用 AZURE_ENV_NAME
@@ -38,6 +41,8 @@ usage() {
       --skip-infra          跳过 Bicep，仅发布代码（需已部署过同名环境）
       --skip-code           仅部署基础设施，不发布代码
       --enable-alerts       启用采集失败/超过 32 小时未完成告警（建议首次采集成功后启用；可能产生 Monitor 费用）
+      --schedule EXPR       UTC 六字段 NCRONTAB（须加引号；默认 '0 0 0 * * *'，北京时间 08:00）
+                也可用 DAILY_COLLECT_SCHEDULE；需要部署基础设施
   -y, --yes                 跳过向导及确认，使用参数/环境变量/默认值
   -h, --help                显示帮助
 
@@ -65,6 +70,7 @@ parse_args() {
       --skip-infra)      SKIP_INFRA=true; shift ;;
       --skip-code)       SKIP_CODE=true; shift ;;
       --enable-alerts)   ENABLE_ALERTS=true; shift ;;
+      --schedule)        COLLECT_SCHEDULE="${2:?}"; SCHEDULE_SPECIFIED=true; shift 2 ;;
       -y|--yes)          ASSUME_YES=true; shift ;;
       -h|--help)         usage; exit 0 ;;
       *) usage >&2; die "未知参数: $1" ;;
@@ -143,17 +149,19 @@ deployment_options() {
   fi
   if [[ -z "$SUBSCRIPTION" ]]; then select_subscription; fi
   if ! $SKIP_INFRA; then
-    log "1/3 选择 region"
+    log "1/4 选择 region"
     regions="$(az functionapp list-flexconsumption-locations --query '[].name' -o tsv)" \
       || die "无法获取 Flex Consumption 区域列表"
     if [[ -n "$regions" ]]; then mapfile -t region_choices <<<"$regions"; fi
     choose_value LOCATION "区域" "$LOCATION" "${region_choices[@]}"
-    log "2/3 选择资源组（也可输入新资源组名称）"
+    log "2/4 选择资源组（也可输入新资源组名称）"
     groups="$(az group list --query '[].name' -o tsv)" || die "无法获取资源组列表"
     if [[ -n "$groups" ]]; then mapfile -t group_choices <<<"$groups"; fi
     choose_value RESOURCE_GROUP_NAME "资源组" "$RESOURCE_GROUP_NAME" "${group_choices[@]}"
-    log "3/3 输入资源名称前缀"
+    log "3/4 输入资源名称前缀"
     choose_value RESOURCE_PREFIX "资源名称前缀" "${RESOURCE_PREFIX:-$ENV_NAME}"
+    log "4/4 确认 UTC 触发时间（六字段：秒 分 时 日 月 星期；0 0 0 * * * = 北京时间每天 08:00）"
+    choose_value COLLECT_SCHEDULE "触发时间 (UTC)" "$COLLECT_SCHEDULE"
   fi
 }
 
@@ -218,6 +226,7 @@ deploy_infra() {
               --parameters environmentName="$ENV_NAME" location="$LOCATION" enableCollectionAlerts="$ENABLE_ALERTS"
               resourceGroupName="$RESOURCE_GROUP_NAME" resourceNamePrefix="$RESOURCE_PREFIX"
               subscriptionReaderAssignmentName="$SUBSCRIPTION_READER_ASSIGNMENT_NAME"
+              dailyCollectSchedule="$COLLECT_SCHEDULE"
               resourceGroupLocation="${group_location:-$LOCATION}")
   if $WHAT_IF; then
     log "预览基础设施变更 (what-if) ..."
@@ -372,7 +381,7 @@ print_summary() {
   # MCP 客户端使用的系统密钥
   az functionapp keys list -g ${RESOURCE_GROUP} -n ${FUNCTION_APP_NAME} --query systemKeys.mcp_extension -o tsv
 
-首次采集会在下一个 UTC 00:00（北京时间 08:00）自动运行。
+首次采集会在 Timer 的下一个计划时间自动运行；时间按 UTC 定义。
 EOF
 }
 
@@ -394,7 +403,7 @@ main() {
   if $SKIP_INFRA && $SKIP_CODE; then die "--skip-infra 与 --skip-code 不能同时使用"; fi
   if $SKIP_INFRA && $WHAT_IF; then die "--what-if 只用于预览基础设施，不能与 --skip-infra 同时使用"; fi
   if $SKIP_INFRA && $ENABLE_ALERTS; then die "--enable-alerts 需要部署基础设施，不能与 --skip-infra 同时使用"; fi
-
+  if $SKIP_INFRA && $SCHEDULE_SPECIFIED; then die "--schedule / DAILY_COLLECT_SCHEDULE 需要部署基础设施，不能与 --skip-infra 同时使用"; fi
   command -v az >/dev/null      || die "未找到 az CLI（Cloud Shell 已内置）"
   command -v python3 >/dev/null || die "未找到 python3（用于打包 zip）"
   command -v curl >/dev/null    || die "未找到 curl"
@@ -402,6 +411,10 @@ main() {
 
   if [[ -n "$SUBSCRIPTION" ]]; then az account set --subscription "$SUBSCRIPTION"; fi
   if ! $ASSUME_YES && ! $WHAT_IF; then deployment_options; fi
+  local schedule_fields=()
+  read -r -a schedule_fields <<<"$COLLECT_SCHEDULE"
+  [[ ${#schedule_fields[@]} -eq 6 && "$COLLECT_SCHEDULE" != *$'\n'* && "$COLLECT_SCHEDULE" != *$'\r'* ]] \
+    || die "schedule 需为 UTC 六字段 NCRONTAB：秒 分 时 日 月 星期"
   [[ "$LOCATION" =~ ^[a-z0-9-]+$ ]] || die "region 需为小写字母/数字/-"
   [[ "$RESOURCE_GROUP_NAME" =~ ^[a-zA-Z0-9_.()-]{1,90}$ && "$RESOURCE_GROUP_NAME" != *. ]] \
     || die "资源组名需为 1-90 位字母/数字/下划线/括号/连字符/点，不能以点结尾"
@@ -423,6 +436,7 @@ main() {
   log "环境: ${ENV_NAME}   区域: ${LOCATION}   部署名: ${DEPLOYMENT_NAME}"
   if ! $SKIP_INFRA; then
     log "资源组: ${RESOURCE_GROUP_NAME}   资源名称前缀: ${RESOURCE_PREFIX:-默认命名}"
+    log "采集计划 (UTC): ${COLLECT_SCHEDULE}"
   fi
 
   if ! $ASSUME_YES && ! $WHAT_IF; then confirm; fi

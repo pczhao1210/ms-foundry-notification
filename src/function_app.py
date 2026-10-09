@@ -17,8 +17,7 @@ app.register_functions(http_routes)
 app.register_functions(mcp_tools)
 
 
-# 00:00 UTC = 08:00 Asia/Shanghai (Flex Consumption has no WEBSITE_TIME_ZONE).
-@app.timer_trigger(arg_name="timer", schedule="0 0 0 * * *", run_on_startup=False, use_monitor=True)
+@app.timer_trigger(arg_name="timer", schedule="%DAILY_COLLECT_SCHEDULE%", run_on_startup=False, use_monitor=True)
 def daily_collect(timer: func.TimerRequest) -> None:
     store, sources = pipeline.live()
     report = pipeline.run_daily(store, sources)

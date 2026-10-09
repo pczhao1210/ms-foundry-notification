@@ -72,11 +72,11 @@ def live() -> tuple[Any, LiveSources]:
 
 
 def run_daily(store: Any, sources: Sources, now: datetime | None = None) -> dict[str, Any]:
-    """Run all steps; failures are recorded in `report["failed"]` instead of aborting the remaining steps."""
+    """Run all steps; separate failed steps from committed snapshots with degraded regional coverage."""
     now = now or datetime.now(timezone.utc)
     collected_at = ev.to_utc_iso(now.isoformat())
     today = ev.local_today(now)
-    report: dict[str, Any] = {"date": today, "collected_at": collected_at, "failed": []}
+    report: dict[str, Any] = {"date": today, "collected_at": collected_at, "failed": [], "degraded": []}
     context: dict[str, Any] = {"store": store, "sources": sources, "today": today, "collected_at": collected_at}
     steps: tuple[tuple[str, Callable[[dict[str, Any]], dict[str, Any]]], ...] = (
         ("arm", _arm_step),
@@ -98,7 +98,9 @@ def run_daily(store: Any, sources: Sources, now: datetime | None = None) -> dict
             report[name] = step(context)
             if report[name].get("stale_regions") or report[name].get("failed_regions"):
                 report[name]["status"] = "degraded"
-                report["failed"].append(name)
+                report["degraded"].append(name)
+                log.warning("daily %s step degraded: stale_regions=%s, failed_regions=%s", name,
+                            report[name].get("stale_regions", []), report[name].get("failed_regions", []))
         except Exception as exc:  # noqa: BLE001 - recorded and re-raised by the caller after all steps ran
             log.exception("daily %s step failed", name)
             report[name] = {"error": type(exc).__name__}

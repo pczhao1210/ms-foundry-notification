@@ -83,6 +83,8 @@ fi
                }}),
                "MOCK_FUNCTION_APP": json.dumps({"properties": {"defaultHostName": "offline.invalid"}}),
                "MOCK_FUNCTIONS": "\n".join(f"review-app/{name}" for name in FUNCTIONS), **overrides}
+        if "DAILY_COLLECT_SCHEDULE" not in overrides:
+            env.pop("DAILY_COLLECT_SCHEDULE", None)
         environment_args = ["-e", environment] if environment is not None else []
         command = ["bash", *(["-s", "--"] if piped else [str(ROOT / "deploy.sh")]), *environment_args, *args]
         script = (ROOT / "deploy.sh").read_text() if piped else None
@@ -132,7 +134,7 @@ fi
                     process.wait()
                 os.close(master)
             result = subprocess.CompletedProcess(command, process.returncode, output.decode(), output.decode())
-        return result, log.read_text().splitlines()
+        return result, log.read_text().splitlines() if log.exists() else []
 
     return run
 
@@ -157,6 +159,36 @@ def test_alerts_default_to_disabled(deploy):
     result, calls = deploy("--what-if")
     assert result.returncode == 0, result.stderr
     assert any("enableCollectionAlerts=false" in call for call in calls)
+
+
+@pytest.mark.parametrize("args, overrides, expected", [
+    ((), {}, "0 0 0 * * *"),
+    (("--schedule", "0 30 1 * * *"), {}, "0 30 1 * * *"),
+    ((), {"DAILY_COLLECT_SCHEDULE": "0 0 16 * * *"}, "0 0 16 * * *"),
+    (("--schedule", "0 30 1 * * *"), {"DAILY_COLLECT_SCHEDULE": "0 0 16 * * *"}, "0 30 1 * * *"),
+])
+def test_collection_schedule_is_forwarded(deploy, args, overrides, expected):
+    result, calls = deploy("--what-if", *args, **overrides)
+    assert result.returncode == 0, result.stderr
+    deployment = next(call for call in calls if call.startswith("az deployment sub what-if"))
+    assert f"dailyCollectSchedule={expected}" in deployment
+
+
+@pytest.mark.parametrize("schedule", ["", "0 0 * * *", "0 0 0 * * *\nextra"])
+def test_collection_schedule_requires_six_fields(deploy, schedule):
+    result, _ = deploy("--what-if", DAILY_COLLECT_SCHEDULE=schedule)
+    assert result.returncode != 0
+    assert "六字段 NCRONTAB" in result.stderr
+
+
+@pytest.mark.parametrize("args, overrides", [
+    (("--schedule", "0 30 1 * * *"), {}),
+    ((), {"DAILY_COLLECT_SCHEDULE": "0 0 0 * * *"}),
+])
+def test_collection_schedule_cannot_be_ignored_when_skipping_infra(deploy, args, overrides):
+    result, _ = deploy("--skip-infra", "-y", *args, **overrides)
+    assert result.returncode != 0
+    assert "需要部署基础设施" in result.stderr
 
 
 def test_subscription_deployment_keeps_provider_validation(deploy):
@@ -227,6 +259,21 @@ def test_portal_test_run_cors_allows_only_azure_portal(infrastructure_template):
         "allowedOrigins": ["https://portal.azure.com"],
         "supportCredentials": False,
     }
+
+
+def test_collection_schedule_template_reaches_app_setting(infrastructure_template):
+    template = infrastructure_template
+    assert template["parameters"]["dailyCollectSchedule"]["defaultValue"] == "0 0 0 * * *"
+    module = next(resource for resource in template["resources"] if resource["name"] == "functionapp")
+    assert module["properties"]["parameters"]["dailyCollectSchedule"]["value"] == (
+        "[parameters('dailyCollectSchedule')]"
+    )
+    site = next(resource for resource in module["properties"]["template"]["resources"]
+                if resource["type"] == "Microsoft.Web/sites")
+    settings = {setting["name"]: setting["value"] for setting in site["properties"]["siteConfig"]["appSettings"]}
+    assert settings["DAILY_COLLECT_SCHEDULE"] == "[parameters('dailyCollectSchedule')]"
+    parameters = json.loads((ROOT / "infra/main.parameters.json").read_text())
+    assert parameters["parameters"]["dailyCollectSchedule"]["value"] == "0 0 0 * * *"
 
 
 def test_what_if_keeps_provider_validation(deploy):
@@ -336,10 +383,10 @@ def test_success_requires_all_functions_and_both_authenticated_endpoints(deploy)
 
 
 @pytest.mark.parametrize("answers, expected", [
-    (["", "", "", "y"], ("eastus2", "rg-review", "review")),
-    (["2", "1", "demo", "y"], ("westus2", "existing-group", "demo")),
-    (["", "", "123", "y"], ("eastus2", "rg-review", "123")),
-    (["99", "westus2", "new-group", "new-prefix", "y"], ("westus2", "new-group", "new-prefix")),
+    (["", "", "", "", "y"], ("eastus2", "rg-review", "review")),
+    (["2", "1", "demo", "", "y"], ("westus2", "existing-group", "demo")),
+    (["", "", "123", "", "y"], ("eastus2", "rg-review", "123")),
+    (["99", "westus2", "new-group", "new-prefix", "", "y"], ("westus2", "new-group", "new-prefix")),
 ])
 def test_interactive_options_use_terminal_and_reach_bicep(deploy, answers, expected):
     result, calls = deploy("--skip-code", answers=answers)
@@ -349,7 +396,36 @@ def test_interactive_options_use_terminal_and_reach_bicep(deploy, answers, expec
     assert f"location={location}" in deployment
     assert f"resourceGroupName={group}" in deployment
     assert f"resourceNamePrefix={prefix}" in deployment
-    assert result.stdout.index("1/3") < result.stdout.index("2/3") < result.stdout.index("3/3")
+    assert result.stdout.index("1/4") < result.stdout.index("2/4") < result.stdout.index("3/4") < result.stdout.index("4/4")
+    assert "dailyCollectSchedule=0 0 0 * * *" in deployment
+
+
+@pytest.mark.parametrize("piped", [False, True])
+@pytest.mark.parametrize("answer, expected", [("", "0 0 0 * * *"), ("0 30 1 * * *", "0 30 1 * * *")])
+def test_interactive_schedule_defaults_or_overrides_without_flag(deploy, piped, answer, expected):
+    result, calls = deploy("--skip-code", piped=piped, answers=["", "", "", answer, "y"])
+    assert result.returncode == 0, result.stderr
+    assert "触发时间 (UTC) [0 0 0 * * *]" in result.stdout
+    deployment = next(call for call in calls if call.startswith("az deployment sub create"))
+    assert f"dailyCollectSchedule={expected}" in deployment
+
+
+@pytest.mark.parametrize("args, overrides", [
+    (("--schedule", "0 30 1 * * *"), {}),
+    ((), {"DAILY_COLLECT_SCHEDULE": "0 30 1 * * *"}),
+])
+def test_interactive_schedule_enter_preserves_preset(deploy, args, overrides):
+    result, calls = deploy("--skip-code", *args, answers=["", "", "", "", "y"], **overrides)
+    assert result.returncode == 0, result.stderr
+    assert "触发时间 (UTC) [0 30 1 * * *]" in result.stdout
+    assert any("dailyCollectSchedule=0 30 1 * * *" in call for call in calls)
+
+
+def test_invalid_interactive_schedule_stops_before_deployment(deploy):
+    result, calls = deploy("--skip-code", answers=["", "", "", "0 0 * * *"])
+    assert result.returncode != 0
+    assert "六字段 NCRONTAB" in result.stderr
+    assert not any(call.startswith("az deployment sub create") for call in calls)
 
 
 def test_yes_uses_explicit_options_without_wizard(deploy):
@@ -358,7 +434,7 @@ def test_yes_uses_explicit_options_without_wizard(deploy):
     deployment = next(call for call in calls if call.startswith("az deployment sub create"))
     assert "resourceGroupName=custom-group" in deployment and "resourceNamePrefix=custom" in deployment
     assert not any(call.startswith("az group list") for call in calls)
-    assert "1/3" not in result.stdout
+    assert "1/4" not in result.stdout
 
 
 def test_existing_resource_group_keeps_its_metadata_location(deploy):
@@ -371,7 +447,7 @@ def test_existing_resource_group_keeps_its_metadata_location(deploy):
 
 @pytest.mark.parametrize("piped", [False, True])
 def test_default_environment_needs_no_arguments(deploy, piped):
-    result, calls = deploy("--skip-code", environment=None, piped=piped, answers=["2", "", "", "", "y"],
+    result, calls = deploy("--skip-code", environment=None, piped=piped, answers=["2", "", "", "", "", "y"],
                            MOCK_SUBSCRIPTIONS='[{"name":"Current","id":"offline-review"},'
                                               '{"name":"Other","id":"offline-other"}]')
     assert result.returncode == 0, result.stderr
@@ -398,7 +474,7 @@ def test_invalid_deployment_outputs_stop_before_function_lookup(deploy, group, a
         "AZURE_RESOURCE_GROUP": {"type": "String", "value": group},
         "AZURE_FUNCTION_APP_NAME": {"type": "String", "value": app},
     }}
-    result, calls = deploy("--skip-code", environment=None, answers=["", "", "", "y"],
+    result, calls = deploy("--skip-code", environment=None, answers=["", "", "", "", "y"],
                            MOCK_DEPLOYMENT_OUTPUTS=json.dumps(outputs))
     assert result.returncode != 0
     assert "部署输出" in result.stderr
@@ -491,7 +567,7 @@ def test_invalid_output_reports_structure_without_values(deploy):
 
 
 def test_cancelled_wizard_does_not_deploy(deploy):
-    result, calls = deploy("--skip-code", answers=["", "", "", "n"])
+    result, calls = deploy("--skip-code", answers=["", "", "", "", "n"])
     assert result.returncode != 0
     assert not any(call.startswith("az deployment sub create") for call in calls)
     assert not any(call.startswith("az provider register") for call in calls)
@@ -508,7 +584,7 @@ def test_invalid_resource_options_fail_before_deployment(deploy, args):
 @pytest.mark.parametrize("answer, selected", [("2", "offline-other"), ("", "offline-review"),
                                              ("offline-other", "offline-other")])
 def test_multiple_subscriptions_are_selected_before_regions(deploy, answer, selected):
-    result, calls = deploy("--skip-code", answers=[answer, "", "", "", "y"],
+    result, calls = deploy("--skip-code", answers=[answer, "", "", "", "", "y"],
                            MOCK_SUBSCRIPTIONS='[{"name":"Same name","id":"offline-review"},'
                                               '{"name":"Same name","id":"offline-other"}]')
     assert result.returncode == 0, result.stderr
@@ -516,12 +592,12 @@ def test_multiple_subscriptions_are_selected_before_regions(deploy, answer, sele
     regions = next(index for index, call in enumerate(calls) if call.startswith("az functionapp list-flex"))
     groups = next(index for index, call in enumerate(calls) if call.startswith("az group list"))
     assert account_set < regions < groups
-    assert result.stdout.index("选择订阅") < result.stdout.index("1/3")
+    assert result.stdout.index("选择订阅") < result.stdout.index("1/4")
     assert "Same name (offline-review)" in result.stdout and "Same name (offline-other)" in result.stdout
 
 
 def test_single_subscription_does_not_prompt(deploy):
-    result, calls = deploy("--skip-code", answers=["", "", "", "y"])
+    result, calls = deploy("--skip-code", answers=["", "", "", "", "y"])
     assert result.returncode == 0, result.stderr
     assert "使用唯一可用订阅" in result.stdout
     assert "订阅 [" not in result.stdout
@@ -529,7 +605,7 @@ def test_single_subscription_does_not_prompt(deploy):
 
 
 def test_default_subscription_is_current_not_first_in_list(deploy):
-    result, calls = deploy("--skip-code", answers=["", "", "", "", "y"],
+    result, calls = deploy("--skip-code", answers=["", "", "", "", "", "y"],
                            MOCK_SUBSCRIPTIONS='[{"name":"Other","id":"offline-other"},'
                                               '{"name":"Current","id":"offline-review"}]')
     assert result.returncode == 0, result.stderr
@@ -545,13 +621,14 @@ def test_code_only_deployment_selects_subscription_before_reading_outputs(deploy
     selected = calls.index("az account set --subscription offline-other")
     outputs = next(index for index, call in enumerate(calls) if call.startswith("az deployment sub show"))
     assert selected < outputs
-    assert "1/3" not in result.stdout
+    assert "1/4" not in result.stdout
+    assert "触发时间 (UTC) [" not in result.stdout
 
 
 @pytest.mark.parametrize("args, overrides", [(("-s", "offline-other"), {}),
                                            ((), {"AZURE_SUBSCRIPTION_ID": "offline-other"})])
 def test_explicit_subscription_skips_subscription_prompt(deploy, args, overrides):
-    result, calls = deploy("--skip-code", *args, answers=["", "", "", "y"], **overrides)
+    result, calls = deploy("--skip-code", *args, answers=["", "", "", "", "y"], **overrides)
     assert result.returncode == 0, result.stderr
     assert "az account set --subscription offline-other" in calls
     assert not any(call.startswith("az account list") for call in calls)

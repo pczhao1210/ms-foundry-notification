@@ -47,7 +47,7 @@
 - MCP 工具只读；description 需写清参数、状态术语映射与时区约定；结果需有条数上限与 `truncated` 标记
 
 ## 约定
-- 时间：存储与比较一律 UTC ISO 8601；“今天/过去/未来 N 天”按 `Asia/Shanghai` 日界计算；调度 `0 0 0 * * *`（UTC 00:00 = 北京 08:00，Flex Consumption 不支持 `WEBSITE_TIME_ZONE`）
+- 时间：存储与比较一律 UTC ISO 8601；“今天/过去/未来 N 天”按 `Asia/Shanghai` 日界计算；Timer 引用应用设置 `DAILY_COLLECT_SCHEDULE`，部署参数 `dailyCollectSchedule` / `deploy.sh --schedule`，默认 `0 0 0 * * *`（UTC 00:00 = 北京 08:00，Flex Consumption 不支持 `WEBSITE_TIME_ZONE` / `TZ`）
 - 事件需带 `source`（`arm` / `docs` / `retail_prices`）与 `kind`（`observed` / `scheduled`），事件 ID 需确定性生成以保证重跑幂等
 - 采集逻辑（I/O）与 normalize/diff/schedule（纯函数）分离，纯函数必须有单元测试
 - 配置走环境变量（`core/config.py` 统一读取），不得硬编码订阅 ID、存储账户名

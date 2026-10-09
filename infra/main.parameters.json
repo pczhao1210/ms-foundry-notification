@@ -17,6 +17,9 @@
     "enableCollectionAlerts": {
       "value": false
     },
+    "dailyCollectSchedule": {
+      "value": "0 0 0 * * *"
+    },
     "alertActionGroupIds": {
       "value": []
     }

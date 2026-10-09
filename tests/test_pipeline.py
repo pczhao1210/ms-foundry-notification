@@ -119,6 +119,7 @@ def test_first_run_stores_baselines_and_schedule_only():
     store, sources = FakeStore(), _sources()
     report = pipeline.run_daily(store, sources, DAY1)
     assert report["failed"] == []
+    assert report["degraded"] == []
     assert set(store.snapshots) == {("2026-10-06", kind) for kind in ("arm", "docs", "prices")}
     assert store.observed == {}
     assert report["docs"]["backfilled"] is None
@@ -176,18 +177,22 @@ def test_source_status_preserves_last_success_when_collection_fails():
     assert store.source_status("prices")["status"] == "complete"
 
 
-def test_status_write_failure_is_reported_without_blocking_other_sources(monkeypatch):
+@pytest.mark.parametrize("state", ["complete", "degraded"])
+def test_status_write_failure_is_reported_without_blocking_other_sources(monkeypatch, state):
     store, sources = FakeStore(), _sources()
+    if state == "degraded":
+        sources.failed_regions = ["westus"]
     save_status = store.save_source_status
 
     def fail_completion(kind, status):
-        if kind == "arm" and status["status"] == "complete":
+        if kind == "arm" and status["status"] == state:
             raise RuntimeError("status unavailable")
         save_status(kind, status)
 
     monkeypatch.setattr(store, "save_source_status", fail_completion)
     report = pipeline.run_daily(store, sources, DAY1)
     assert report["failed"] == ["arm"]
+    assert report["degraded"] == (["arm"] if state == "degraded" else [])
     assert report["arm"]["status_error"] == "RuntimeError"
     assert store.source_status("arm")["status"] == "collecting"
     assert store.source_status("prices")["status"] == "complete"
@@ -198,7 +203,31 @@ def test_arm_without_any_region_fails_but_prices_still_run():
     sources.failed_regions = ["eastus2"]
     report = pipeline.run_daily(store, sources, DAY1)
     assert report["failed"] == ["arm"]
+    assert report["degraded"] == []
     assert ("2026-10-06", "prices") in store.snapshots
+
+
+@pytest.mark.parametrize("failed_source", [None, "docs", "prices"])
+def test_partial_first_run_separates_degradation_from_source_failure(caplog, failed_source):
+    store, sources = FakeStore(), _sources()
+    sources.failed_regions = ["westus"]
+    if failed_source:
+        sources.fail.add(failed_source)
+
+    report = pipeline.run_daily(store, sources, DAY1)
+
+    assert report["failed"] == ([failed_source] if failed_source else [])
+    assert report["degraded"] == ["arm"]
+    assert report["arm"]["status"] == "degraded"
+    assert report["arm"]["failed_regions"] == ["westus"]
+    assert report["arm"]["stale_regions"] == []
+    assert store.latest_snapshot("arm")["failed_regions"] == ["westus"]
+    status = store.source_status("arm")
+    assert status["status"] == "degraded"
+    assert status["last_success_at"] is None
+    assert status["snapshot_at"] == "2026-10-06T00:00:00Z"
+    assert any(record.levelname == "WARNING" and "daily arm step degraded" in record.message
+               and "westus" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("kind, source, event_type", [("arm", "arm", ev.STATUS_CHANGED),
@@ -289,7 +318,8 @@ def test_partial_rerun_preserves_todays_successful_region_and_events():
 
     report = pipeline.run_daily(store, sources, DAY2)
 
-    assert report["failed"] == ["arm"]
+    assert report["failed"] == []
+    assert report["degraded"] == ["arm"]
     assert report["arm"]["status"] == "degraded"
     assert report["arm"]["stale_regions"] == ["westus"]
     assert store.observed == observed
@@ -315,7 +345,8 @@ def test_empty_region_is_carried_forward_when_other_regions_succeed():
     pipeline.run_daily(store, sources, DAY1)
     sources.arm["westus"] = []
     report = pipeline.run_daily(store, sources, DAY2)
-    assert report["failed"] == ["arm"]
+    assert report["failed"] == []
+    assert report["degraded"] == ["arm"]
     assert report["arm"]["stale_regions"] == ["westus"]
     assert not any(event["source"] == "arm" for event in store.observed.values())
 

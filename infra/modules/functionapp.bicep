@@ -11,6 +11,7 @@ param deploymentContainerName string
 param appInsightsConnectionString string
 param maximumInstanceCount int
 param instanceMemoryMB int
+param dailyCollectSchedule string
 
 resource plan 'Microsoft.Web/serverfarms@2024-04-01' = {
   name: planName
@@ -61,6 +62,7 @@ resource site 'Microsoft.Web/sites@2024-04-01' = {
         { name: 'FOUNDRY_SUBSCRIPTION_ID', value: subscription().subscriptionId }
         { name: 'STORAGE_BLOB_ENDPOINT', value: blobEndpoint }
         { name: 'STORAGE_TABLE_ENDPOINT', value: tableEndpoint }
+        { name: 'DAILY_COLLECT_SCHEDULE', value: dailyCollectSchedule }
       ]
     }
     functionAppConfig: {

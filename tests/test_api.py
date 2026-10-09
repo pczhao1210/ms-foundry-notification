@@ -31,7 +31,28 @@ def test_function_app_bindings():
             for prop in json.loads(trigger["toolProperties"]):
                 assert set(prop) == {"propertyName", "propertyType", "description", "isRequired"}
     [timer] = [t for t in triggers if t["type"] == "timerTrigger"]
-    assert timer["schedule"] == "0 0 0 * * *"
+    assert timer["schedule"] == "%DAILY_COLLECT_SCHEDULE%"
+
+
+@pytest.mark.parametrize("failed, degraded", [([], []), ([], ["arm"]), (["arm"], []),
+                                            (["docs"], ["arm"]), (["prices"], []),
+                                            (["arm"], ["arm"]), (["arm", "prices"], [])])
+def test_daily_collect_fails_only_for_failed_steps(monkeypatch, failed, degraded):
+    from unittest.mock import Mock
+
+    import function_app
+
+    store, sources = object(), object()
+    run_daily = Mock(return_value={"failed": failed, "degraded": degraded})
+    monkeypatch.setattr(function_app.pipeline, "live", lambda: (store, sources))
+    monkeypatch.setattr(function_app.pipeline, "run_daily", run_daily)
+
+    if failed:
+        with pytest.raises(RuntimeError, match=f"^daily collection steps failed: {', '.join(failed)}$"):
+            function_app.daily_collect(None)
+    else:
+        function_app.daily_collect(None)
+    run_daily.assert_called_once_with(store, sources)
 
 
 def test_host_keeps_mcp_webhook_behind_system_key():

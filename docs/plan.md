@@ -30,7 +30,7 @@ API 状态映射（官方）：`Preview`→Preview，`GenerallyAvailable`→GA�
 
 ## 3. 架构（Azure Functions Flex Consumption, Python v2）
 ```
-Timer (0 0 0 * * * UTC = 08:00 Asia/Shanghai)
+Timer (%DAILY_COLLECT_SCHEDULE%; default 0 0 0 * * * UTC = 08:00 Asia/Shanghai)
   ├─ collect_arm()    → 遍历 regions → 聚合 key=(format,name,version)
   ├─ collect_docs()   → 解析 markdown 表格
   ├─ collect_prices() → Retail Prices API 全量（独立步骤，失败不影响模型事件）
@@ -54,7 +54,7 @@ MCP Server（Functions MCP 扩展，Streamable HTTP，system key `mcp_extension`
 - 今天 = 今日 diff 的 observed 事件 + 日期为今天的 scheduled 事件
 - 未来 N 天 = scheduled 事件（ARM 日期 + 文档日期合并）
 - 过去 N 天 = Table 历史；首次部署时用文档 Git 历史回填（§3.5），ARM 与价格无历史，从首份快照起累积
-- 编排（`pipeline.py`）：ARM / 文档 / 价格三个步骤互相隔离，任一失败只记入报告 `failed`，其余照常入库；ARM 部分区域失败也标记 `status=degraded` 并列入 `failed`，有效区域仍入库。有失败时 timer 函数最终抛错，便于在 App Insights 告警。每个来源采集前先重放该来源未完成批次，保留原观测日期；恢复失败不覆盖待提交数据
+- 编排（`pipeline.py`）：ARM / 文档 / 价格三个步骤互相隔离，采集异常、提交失败或状态写入失败记入报告 `failed`，其余照常入库；ARM 部分区域失败但有效区域已提交时标记 `status=degraded` 并单独列入 `degraded`，记录含缺失区域的 WARNING，不列入 `failed`。Timer 只在 `failed` 非空时最终抛错；仅有降级时门户调用成功，但 REST/MCP 仍返回 `collection.complete=false`，不将调用成功等同于数据完整。每个来源采集前先重放该来源未完成批次，保留原观测日期；恢复失败不覆盖待提交数据
 - 窗口与聚合规则见 §3.4
 
 ## 3.1 认证（2026-10-06 决策：Function Key）
@@ -205,7 +205,9 @@ Bicep 契约（两种方式都依赖，修改时须同步）：
 - 可选迁移参数：`subscriptionReaderAssignmentName`（默认空），仅用于复用同一订阅、同一实际主体、同一 Reader 角色的已有分配 GUID。`deploy.sh` 通过 `AZURE_SUBSCRIPTION_READER_ASSIGNMENT_NAME` 传入；azd 通过 `infra/main.parameters.json` 设置。不是完整资源 ID，也不得用于复用属于旧主体的冲突分配。
 - Flex 部署存储使用托管身份认证（`functionAppConfig.deployment.storage.authentication`），不依赖共享密钥
 
-部署向导（2026-10-08）：不带参数可运行，环境名默认 `foundry-notify`。未通过 `-s/--subscription` 或 `AZURE_SUBSCRIPTION_ID` 指定订阅时，先获取 Enabled 订阅列表；多个订阅时显示名称和 ID，从 `/dev/tty` 读取编号、名称或 ID，默认当前订阅；只有一个时自动使用，无可用订阅则退出。通过 `az account set` 切换后，从 `/dev/tty` 按顺序询问 region（支持 Flex 的区域编号或名称，默认 `eastus2`）、资源组（所选订阅的已有组编号/名称或新名称，默认 `rg-<env>`）、资源名称前缀（默认环境名）；回车保留参数/环境变量/默认值，确认后部署。命令行可用 `-g/--resource-group`、`--resource-prefix`，对应 `AZURE_RESOURCE_GROUP`、`AZURE_RESOURCE_NAME_PREFIX`；`-y` 与 `--what-if` 跳过订阅选择及部署向导，使用指定订阅或当前订阅且默认保留旧版哈希命名。`--skip-infra` 仍按需选择订阅，但不询问命名选项，直接读取所选订阅内同名环境的部署输出。更改组名或前缀会创建新资源，不迁移数据；重复部署须沿用相同配置，预览自定义配置需显式传入对应参数。
+采集调度（2026-10-09）：Bicep 参数 `dailyCollectSchedule` 默认为 `0 0 0 * * *`（每天 UTC 00:00 / 北京时间 08:00），经 Function App 模块写入应用设置 `DAILY_COLLECT_SCHEDULE`；Python Timer 装饰器以 `%DAILY_COLLECT_SCHEDULE%` 引用，由 Functions host 解析，无需业务配置层处理。`deploy.sh --schedule '0 30 1 * * *'` 或环境变量 `DAILY_COLLECT_SCHEDULE` 可覆盖，命令行优先；脚本仅检查六字段与单行格式，具体取值由 Functions 校验。azd 在 `infra/main.parameters.json` 中提供相同默认值，可修改 `dailyCollectSchedule.value`。首次升级必须部署基础设施和代码；显式设置时间拒绝与 `--skip-infra` 同用，后续仅改设置可用 `--skip-code`。每次基础设施部署均写入指定值或默认值，会覆盖门户修改；门户应用设置也可调整，无需再次发布代码。Flex 不设置 `WEBSITE_TIME_ZONE` / `TZ`，调度固定按 UTC，查询日界仍为 Asia/Shanghai。本地 `local.settings.json` 的 Values 也需定义此设置，否则 host 无法解析 Timer。可选健康告警仍为 32 小时阈值，降低采集频率时需另行调整告警。
+
+部署向导（2026-10-09）：不带参数可运行，环境名默认 `foundry-notify`。未通过 `-s/--subscription` 或 `AZURE_SUBSCRIPTION_ID` 指定订阅时，先获取 Enabled 订阅列表；多个订阅时显示名称和 ID，从 `/dev/tty` 读取编号、名称或 ID，默认当前订阅；只有一个时自动使用，无可用订阅则退出。通过 `az account set` 切换后，从 `/dev/tty` 按顺序询问 region（支持 Flex 的区域编号或名称，默认 `eastus2`）、资源组（所选订阅的已有组编号/名称或新名称，默认 `rg-<env>`）、资源名称前缀（默认环境名）、UTC 触发时间（六字段 NCRONTAB，默认 `0 0 0 * * *`，北京时间每天 08:00）；回车保留参数/环境变量/默认值，检查输入格式，最终确认后部署。不必传 `--schedule`，该参数或 `DAILY_COLLECT_SCHEDULE` 仅预设第四步默认值；交互输入表达式不加引号。命令行可用 `-g/--resource-group`、`--resource-prefix`，对应 `AZURE_RESOURCE_GROUP`、`AZURE_RESOURCE_NAME_PREFIX`；`-y` 与 `--what-if` 跳过订阅选择及部署向导，使用指定订阅或当前订阅且默认保留旧版哈希命名。`--skip-infra` 仍按需选择订阅，但跳过四步向导，直接读取所选订阅内同名环境的部署输出。更改组名或前缀会创建新资源，不迁移数据；重复部署须沿用相同配置，预览自定义配置需显式传入对应参数。
 
 `deploy.sh` 流程：参数校验 → 获取源码（脚本位于仓库 checkout 且未指定 `-r/--ref` 时用本地文件；否则（如 `curl | bash`）下载 `github.com/<DEPLOY_REPO>/archive/<ref>.tar.gz` 到临时目录，ref 默认 `main`）→ 订阅 RBAC 权限预检（仅告警）→ 注册资源提供程序（`--what-if` 只检查状态，不注册）→ 校验区域支持 Flex（`az functionapp list-flexconsumption-locations`）→ `az deployment sub create`（`--what-if` 仅预览）→ 读取部署输出 → 打包 `src/`（排除 `.venv`/`__pycache__`/`local.settings.json`/`tests`）→ `az functionapp deployment source config-zip --build-remote true`（Python 在 Flex 上必须远程构建）→ 等待完整 13 个函数注册 → 无 key 的 REST GET 与 MCP initialize POST 均须返回 401 → 打印端点与取 key 命令（**不打印密钥值**）。注册超时、任何端点鉴权不符或请求失败均非零退出，不输出部署完成。HTTP 探测设置连接及总时限；不获取任何密钥。部署名固定为 `foundry-notify-<env>`，重复执行幂等；`--skip-infra` 仅发布代码。脚本主流程包在 `main()` 中、末行调用（管道下载中断不会执行半截脚本）；确认提示从 `/dev/tty` 读取，无终端时须加 `-y`。
 
@@ -216,6 +218,8 @@ Function App 主机名校验（2026-10-08）：旧 `--query defaultHostName -o t
 订阅 Reader 幂等性（2026-10-08）：角色分配的主体与作用域不可更新。旧分配 ID 只依赖环境/区域/组名/资源前缀，未包含实际主体；同名 UAMI 重建后 `principalId` 改变，仍更新旧分配会触发 `RoleAssignmentUpdateNotPermitted`。Reader 改放入 `targetScope = subscription` 的 `subscription_rbac.bicep` 模块，接收身份模块的 `principalId`，默认使用 `guid(subscription().id, identityPrincipalId, readerRoleId)`；模块边界使身份创建后的输出可作为内部资源名的计算输入。模块部署名带资源后缀，避免不同环境共用订阅级部署名。相同主体重跑确定性不变，新主体获得新 ID，不删除旧授权。已有成功部署迁移时，同一主体/作用域/角色的重复授权可能触发 `RoleAssignmentExists`，须确认匹配后显式设置上述复用参数，并在后续部署保留该值；不自动寻找或删除分配。存储/监控已有的 principal-based 命名不变，权限仍仅为订阅 Reader。离线测试编译并解析 ARM JSON，断言身份输出传递、分配 GUID 输入、Reader 权限及复用参数；CI 在 pytest 前安装固定版本 Bicep，本地缺少编译器时仅跳过该编译契约测试。云端具体冲突仍需 deployment operations 确认；失败记录未恢复为 `Succeeded` 前，不能依靠 `--skip-infra` 跳过本次基础设施故障。
 
 采集告警（显式启用）：建议首次采集成功后设置 `enableCollectionAlerts=true`；脚本支持 `--enable-alerts`（不能与 `--skip-infra` 同用），azd 可在 `infra/main.parameters.json` 中设置布尔值。每小时查询专用 Log Analytics workspace 的 AppRequests，最近一次 daily_collect 失败或 32 小时内没有完成调用时触发 severity 2 告警；成功后自动恢复。Request 遥测未采样，窗口 48 小时。规则可能产生 Azure Monitor 费用，默认不创建；通知需在门户配置 Action Group 或通过 `alertActionGroupIds` 指定已有组，无接收组时只生成告警记录。云端须验证实际遥测表、函数名称及通知投递。
+
+仅部分区域缺失的降级调用属于成功执行，不触发上述基于 AppRequests 的失败告警；数据覆盖度需查看查询响应的 `collection` 和 `daily arm step degraded` WARNING 日志。
 
 仓库：`https://github.com/pczhao1210/ms-foundry-notification`（MIT）。CI 已提供 push/PR/手动触发的 Python 3.12 验证：安装固定版本依赖、pip check、pytest（含部署脚本模拟）、bash -n、Bicep 0.48.1 编译，仅授予 contents:read，不访问 Azure 订阅、不读取部署密钥。运行时及传递依赖固定在 `src/requirements.txt`，测试依赖固定在 `requirements-dev.txt`，与已验证的 Linux/Python 3.12 环境一致；升级时需整体解析依赖并重跑测试，固定版本不替代安全更新。自动部署（Functions Action + OIDC）仍为可选后续事项。
 

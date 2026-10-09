@@ -74,14 +74,15 @@ az functionapp keys list -g <rg> -n <app> --query systemKeys.mcp_extension -o ts
 curl -fsSL https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/main/deploy.sh | bash
 ```
 
-默认先选择订阅，再进入三步部署向导，每步直接回车保留默认：
+默认先选择订阅，再进入四步部署向导，每步直接回车保留默认：
 如果有多个可用（Enabled）订阅，先显示订阅名称和 ID，可输入编号、名称或 ID；回车保留当前订阅。只有一个可用订阅时自动使用。`-s/--subscription` 或 `AZURE_SUBSCRIPTION_ID` 已指定订阅时跳过此步骤；重名订阅请用编号或 ID 区分。
 
 1. 选择 region：显示支持 Flex Consumption 的区域，可输入编号或名称，默认 `eastus2`。
 2. 选择资源组：显示当前订阅已有组，可输入编号、已有组名或新组名，默认 `rg-foundry-notify`。已有组保留其所在地，资源部署到所选 region。
-3. 输入资源名称前缀：默认 `foundry-notify`；最终确认后才开始部署。
+3. 输入资源名称前缀：默认 `foundry-notify`。
+4. 确认 UTC 触发时间：输入六字段 NCRONTAB，默认 `0 0 0 * * *`（北京时间每天 08:00）；最终确认后才开始部署。
 
-`-e <env>` 改变环境名、默认资源组和向导默认前缀；未指定时环境名为 `foundry-notify`。`-l`、`-g/--resource-group`、`--resource-prefix` 可预设各步默认值，环境变量分别为 `AZURE_LOCATION`、`AZURE_RESOURCE_GROUP`、`AZURE_RESOURCE_NAME_PREFIX`。
+`-e <env>` 改变环境名、默认资源组和向导默认前缀；未指定时环境名为 `foundry-notify`。`-l`、`-g/--resource-group`、`--resource-prefix`、`--schedule` 可预设各步默认值，环境变量分别为 `AZURE_LOCATION`、`AZURE_RESOURCE_GROUP`、`AZURE_RESOURCE_NAME_PREFIX`、`DAILY_COLLECT_SCHEDULE`。
 
 脚本会从本仓库下载 `infra/` 与 `src/` 到临时目录后部署，结束后自动清理。常用变体（`bash -s --` 之后即脚本参数）：
 
@@ -102,7 +103,7 @@ cd ms-foundry-notification
 bash deploy.sh
 ```
 
-资源名称保留唯一性后缀，例如 `func-<prefix>-<token>`；存储账户去掉前缀中的 `-`，只使用前 9 位，再加完整唯一性后缀以满足 24 位限制。后续基础设施部署须沿用相同环境名、区域、资源组与前缀；更改资源组或前缀会创建新资源，不会迁移数据或删除旧资源。`-y`、`--what-if` 跳过订阅选择及部署向导，使用显式指定的订阅或当前订阅；非交互模式未指定前缀时保留旧版哈希命名。预览向导配置时需显式传入 `-g` 和 `--resource-prefix`。`--skip-infra` 仍会按需选择订阅，但跳过区域、资源组、前缀三步，读取所选订阅内同名环境的部署输出更新代码。
+资源名称保留唯一性后缀，例如 `func-<prefix>-<token>`；存储账户去掉前缀中的 `-`，只使用前 9 位，再加完整唯一性后缀以满足 24 位限制。后续基础设施部署须沿用相同环境名、区域、资源组与前缀；更改资源组或前缀会创建新资源，不会迁移数据或删除旧资源。`-y`、`--what-if` 跳过订阅选择及部署向导，使用显式指定的订阅或当前订阅；非交互模式未指定前缀时保留旧版哈希命名。预览向导配置时需显式传入 `-g`、`--resource-prefix` 和自定义 `--schedule`。`--skip-infra` 仍会按需选择订阅，但跳过区域、资源组、前缀、触发时间四步，读取所选订阅内同名环境的部署输出更新代码。
 
 脚本只依赖 `az`、`python3`、`curl`（Cloud Shell 均已内置）：选择部署选项 → 获取源码 → 订阅级 Bicep 部署 → 打包 `src/` → `az functionapp deployment source config-zip --build-remote true`（Flex Consumption 远程构建）→ 确认完整 13 个函数注册，REST/MCP 无 key 请求均返回 401 → 输出端点与取 key 命令（不打印密钥值）。验收失败会非零退出；仍需在本人终端使用调用方密钥验证实际 REST/MCP 查询。`--what-if` 不注册资源提供程序或部署资源。相同配置可重复执行（幂等）。通过管道运行时向导与部署确认均从 `/dev/tty` 读取；无终端（如 CI）时请加 `-y`。
 
@@ -134,9 +135,23 @@ azd up        # 提示输入环境名 / 订阅 / 区域
 
 首次采集在下一个 UTC 00:00（北京时间 08:00）运行；在此之前 `/api/models`、`/api/prices` 返回 503（尚无快照），变化接口返回空结果且 `collection.complete=false`。首次运行会用文档 Git 历史回填最近 30 天的文档变化；ARM 与价格变化从第二天起产生。
 
-采集结果先保存为待提交批次，事件及计划写入成功后才发布快照。写入中断时，下次运行会先按原日期恢复批次；同一来源的采集不能并行手工触发。ARM 区域失败会保留该区域最近成功的数据并使任务报告降级，其他来源仍继续处理；空目录不会被当作全部模型下线。
+采集结果先保存为待提交批次，事件及计划写入成功后才发布快照。写入中断时，下次运行会先按原日期恢复批次；同一来源的采集不能并行手工触发。ARM 区域失败会保留该区域最近成功的数据并使任务报告降级，其他来源仍继续处理；空目录不会被当作全部模型下线。部分区域缺失但有效数据已保存时，报告记入 `degraded` 并输出 WARNING，门户调用标为成功，REST/MCP 仍返回 `collection.complete=false`；采集、提交或状态写入真正失败时才记入 `failed` 并使调用失败。因此文件已生成不一定代表所有步骤成功，可在 Application Insights 中检查 `daily run report` 和异常。
 
 最新快照使用轻量索引读取，旧存储布局会在下次成功采集后自动建立索引。各来源报告保存在 snapshots 容器的 `status/{kind}.json.gz` 与 `runs/YYYY-MM-DD/{kind}.json.gz`；日报保留当天最后一次尝试。
+
+### 采集触发时间（UTC）
+
+直接运行 `bash deploy.sh` 即可在资源前缀之后确认 UTC 触发时间，无需加 `--schedule`；回车保留 `0 0 0 * * *`，即每天 UTC 00:00 / 北京时间 08:00。输入格式为六字段 NCRONTAB（秒、分、时、日、月、星期），交互输入不加引号。也可通过 `--schedule` 预设此步骤的默认值，命令行必须用引号包住。例如每天 UTC 01:30 / 北京时间 09:30：
+
+```bash
+bash deploy.sh -e <env> --schedule '0 30 1 * * *'
+```
+
+一键部署同样支持：在 `bash -s --` 后加 `--schedule '0 30 1 * * *'`。也可设置环境变量 `DAILY_COLLECT_SCHEDULE`，命令行参数优先。脚本检查六字段格式，具体表达式的有效取值由 Azure Functions 校验。azd 用户修改 `infra/main.parameters.json` 的 `dailyCollectSchedule.value` 后部署，默认值相同。
+
+时间写入 Function App 应用设置 `DAILY_COLLECT_SCHEDULE`，Timer 使用 `%DAILY_COLLECT_SCHEDULE%` 引用。已有环境首次升级需同时部署基础设施和代码，不能仅用 `--skip-infra`。以后仅改时间可用 `--skip-code --schedule '...'`，或在门户「设置 → 环境变量 → 应用设置」修改该值并应用；修改应用设置默认会重启应用。显式指定时间不能与 `--skip-infra` 同用；未指定时间的基础设施部署会恢复默认值，后续部署需传入希望保留的时间。
+
+Flex Consumption 不支持 `WEBSITE_TIME_ZONE` / `TZ`，不要添加这些设置；表达式始终按 UTC 定义。事件查询的日界仍按 Asia/Shanghai 计算。采集健康告警仍以 32 小时未完成为阈值，若设置更低的采集频率，需同步调整告警设计。
 
 ### 手动运行与门户排查
 
@@ -155,6 +170,8 @@ az functionapp cors add -g <resource-group> -n <function-app> \
 ### 可选采集告警
 
 首次采集成功后，可运行 `bash deploy.sh -e <env> --skip-code --enable-alerts` 启用采集健康告警；azd 用户在 `infra/main.parameters.json` 将 `enableCollectionAlerts.value` 改为 true 后重新 provision。规则每小时检查最近采集是否失败、是否超过 32 小时没有完成调用。默认不创建规则，启用可能产生 Azure Monitor 费用。
+
+此规则不对成功执行但部分区域缺失的降级调用告警；数据完整性以响应中的 `collection` 为准，缺失区域也会记录在 `daily arm step degraded` WARNING 日志中。
 
 通知接收方需在 Azure 门户绑定 Action Group，或通过 Bicep 参数 `alertActionGroupIds` 指定已有组；未配置时只有告警记录，不发送通知。真实遥测与告警投递仍需云端验证。
 
@@ -175,6 +192,7 @@ python -m pytest -q          # 离线单元测试，不访问网络/Azure
   "IsEncrypted": false,
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "python",
+    "DAILY_COLLECT_SCHEDULE": "0 0 0 * * *",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "STORAGE_USE_EMULATOR": "true",
     "AZURE_TOKEN_CREDENTIALS": "AzureCliCredential",

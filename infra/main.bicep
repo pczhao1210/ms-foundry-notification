@@ -29,6 +29,10 @@ param subscriptionReaderAssignmentName string = ''
 @description('Opt in to an hourly collection health alert after the first successful run; Azure Monitor charges may apply.')
 param enableCollectionAlerts bool = false
 
+@minLength(1)
+@description('Collection timer NCRONTAB expression in UTC; defaults to daily 00:00 UTC (08:00 Asia/Shanghai).')
+param dailyCollectSchedule string = '0 0 0 * * *'
+
 @description('Optional existing Action Group resource IDs used by the collection health alert.')
 param alertActionGroupIds array = []
 
@@ -120,6 +124,7 @@ module functionApp 'modules/functionapp.bicep' = {
     appInsightsConnectionString: monitoring.outputs.connectionString
     maximumInstanceCount: maximumInstanceCount
     instanceMemoryMB: instanceMemoryMB
+    dailyCollectSchedule: dailyCollectSchedule
   }
   dependsOn: [
     rbac
