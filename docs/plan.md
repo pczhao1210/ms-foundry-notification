@@ -177,7 +177,9 @@ tests/ (fixtures + pytest，离线运行)
   fixtures/retail_prices_foundry_eastus2_2026-10-06.json   # Retail Prices 真实响应（eastus2 子集，1770 行）
   fixtures/model_retirement_schedule_2026-10-05.md         # 文档 include 文件（CC BY 4.0，首行注明出处）
 ```
-IaC：Flex Consumption（FC1，Python 3.12）+ Storage（`allowSharedKeyAccess=false`，容器 `app-package`/`snapshots`，表 `events`/`schedule`）+ Log Analytics + App Insights（`DisableLocalAuth`，Entra 上报）+ User-assigned MI；MI 在订阅级授予 Reader，在存储上授予 Blob Data Owner / Queue / Table Data Contributor，在 App Insights 上授予 Monitoring Metrics Publisher；可选 `principalId` 为本地开发者授予 Blob/Table Data Contributor。
+IaC：Flex Consumption（FC1，Python 3.12）+ Storage（`allowSharedKeyAccess=false`，容器 `app-package`/`snapshots`，表 `events`/`schedule`）+ Log Analytics + App Insights（`DisableLocalAuth`，Entra 上报）+ User-assigned MI；MI 在订阅级授予 Reader，在存储上授予 Blob Data Owner / Queue / Table Data Contributor，在 App Insights 上授予 Monitoring Metrics Publisher；可选 `principalId` 在存储账户作用域为本地开发者授予 Blob/Queue/Table Data Contributor（也用于 Portal 的 Entra ID 数据访问；浏览资源还需 Reader 或更高管理权限）。
+
+Portal 只读查看：在存储账户作用域为查看者授予对应的 Storage Blob/Queue/Table Data Reader，无需增加写入权限。Owner/Contributor 管理角色不包含数据读取权限；能够列出队列或表也不代表能够读取消息或实体，验证时须实际只读窥视消息或查询实体。跨租户订阅须在目标租户确认当前用户对象，不能复用默认订阅租户中的对象 ID。角色分配可能需要约 10 分钟生效；保持共享密钥禁用，不以账号密钥绕过 Entra 授权。
 
 配置（`core/config.py`，环境变量；云端由 Bicep 写入 app settings，凭据为 UAMI `AZURE_CLIENT_ID`）：
 

@@ -20,7 +20,7 @@ param resourceGroupLocation string = location
 @description('Optional lowercase resource name prefix; empty preserves the original names. Storage uses up to nine alphanumeric prefix characters.')
 param resourceNamePrefix string = ''
 
-@description('Optional user object ID granted Blob/Table data access for local development.')
+@description('Optional user object ID granted Blob/Queue/Table data access for local development and portal access.')
 param principalId string = ''
 
 @description('Optional existing subscription Reader assignment GUID for this managed identity; leave empty for principal-based naming.')

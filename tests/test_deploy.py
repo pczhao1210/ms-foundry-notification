@@ -124,7 +124,7 @@ fi
                         break
                     output += chunk
                     pending += chunk
-                    if "回车保留）: ".encode() in pending or b"[y/N] " in pending:
+                    if b"Enter to keep: " in pending or b"[y/N] " in pending:
                         os.write(master, (next(responses) + "\n").encode())
                         pending = b""
                 process.wait(timeout=2)
@@ -139,9 +139,60 @@ fi
     return run
 
 
+def test_help_is_bilingual_and_does_not_call_azure(deploy):
+    result, calls = deploy("--help")
+    assert result.returncode == 0, result.stderr
+    for chinese, english in [
+        ("用法", "Usage"),
+        ("环境名", "Environment name"),
+        ("部署区域", "Deployment region"),
+        ("资源组", "Resource group"),
+        ("资源名称前缀", "Resource name prefix"),
+        ("目标订阅", "Target subscription"),
+        ("六字段 NCRONTAB", "six-field UTC NCRONTAB"),
+        ("所需权限", "Required permissions"),
+    ]:
+        assert chinese in result.stdout and english in result.stdout
+    assert not calls
+
+
+@pytest.mark.parametrize("piped", [False, True])
+def test_deployment_prompts_and_summary_are_bilingual(deploy, piped):
+    result, _ = deploy(answers=["", "", "", "", "y"], piped=piped)
+    assert result.returncode == 0, result.stderr
+    for chinese, english in [
+        ("使用唯一可用订阅", "Using the only enabled subscription"),
+        ("选择区域", "Select a region"),
+        ("选择资源组", "Select a resource group"),
+        ("输入资源名称前缀", "Enter a resource name prefix"),
+        ("触发时间 (UTC)", "Schedule (UTC)"),
+        ("回车保留", "Enter to keep"),
+        ("确认部署?", "Confirm deployment?"),
+        ("部署基础设施", "Deploying infrastructure"),
+        ("发布代码到", "Publishing code to"),
+        ("鉴权检查通过", "Authentication check passed"),
+        ("部署完成", "Deployment complete"),
+        ("获取/创建密钥", "Get/create keys"),
+    ]:
+        assert chinese in result.stdout and english in result.stdout
+
+
+@pytest.mark.parametrize("args, chinese, english", [
+    (("--unknown",), "未知参数", "Unknown argument"),
+    (("--skip-infra", "--skip-code"), "不能同时使用", "cannot be used together"),
+    (("--what-if", "--schedule", "0 0 * * *"), "六字段 NCRONTAB", "six-field UTC NCRONTAB"),
+])
+def test_deployment_validation_errors_are_bilingual(deploy, args, chinese, english):
+    result, calls = deploy(*args)
+    assert result.returncode != 0
+    assert chinese in result.stderr and english in result.stderr
+    assert not any(call.startswith("az deployment") for call in calls)
+
+
 def test_what_if_never_registers_providers_or_deploys_code(deploy):
     result, calls = deploy("--what-if")
     assert result.returncode == 0, result.stderr
+    assert "尚未注册" in result.stderr and "is not registered" in result.stderr
     assert any(call.startswith("az provider show") for call in calls)
     assert any(call.startswith("az deployment sub what-if") for call in calls)
     assert not any(call.startswith("az provider register") for call in calls)
@@ -222,6 +273,30 @@ def infrastructure_template():
                             text=True, capture_output=True, timeout=60)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def test_user_storage_roles_cover_blob_queue_and_table(infrastructure_template):
+    template = infrastructure_template
+    assert template["parameters"]["principalId"]["defaultValue"] == ""
+    module = next(resource for resource in template["resources"] if resource["name"] == "rbac")
+    assert module["properties"]["parameters"]["userPrincipalId"]["value"] == "[parameters('principalId')]"
+    nested = module["properties"]["template"]
+    assert nested["variables"]["roles"]["storageBlobDataContributor"] == "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+    assert nested["variables"]["roles"]["storageQueueDataContributor"] == "974c5e8b-45b9-4653-ba55-5f855dd0fb88"
+    assert nested["variables"]["roles"]["storageTableDataContributor"] == "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3"
+    assert nested["variables"]["userStorageRoles"] == (
+        "[if(empty(parameters('userPrincipalId')), createArray(), "
+        "createArray(variables('roles').storageBlobDataContributor, "
+        "variables('roles').storageQueueDataContributor, "
+        "variables('roles').storageTableDataContributor))]"
+    )
+    assignment = next(resource for resource in nested["resources"]
+                      if resource.get("copy", {}).get("name") == "userStorage")
+    assert assignment["scope"] == (
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+    )
+    assert assignment["properties"]["principalId"] == "[parameters('userPrincipalId')]"
+    assert assignment["properties"]["principalType"] == "User"
 
 
 def test_subscription_reader_assignment_template_tracks_principal(infrastructure_template):
@@ -405,7 +480,7 @@ def test_interactive_options_use_terminal_and_reach_bicep(deploy, answers, expec
 def test_interactive_schedule_defaults_or_overrides_without_flag(deploy, piped, answer, expected):
     result, calls = deploy("--skip-code", piped=piped, answers=["", "", "", answer, "y"])
     assert result.returncode == 0, result.stderr
-    assert "触发时间 (UTC) [0 0 0 * * *]" in result.stdout
+    assert "触发时间 (UTC) / Schedule (UTC) [0 0 0 * * *]" in result.stdout
     deployment = next(call for call in calls if call.startswith("az deployment sub create"))
     assert f"dailyCollectSchedule={expected}" in deployment
 
@@ -417,7 +492,7 @@ def test_interactive_schedule_defaults_or_overrides_without_flag(deploy, piped, 
 def test_interactive_schedule_enter_preserves_preset(deploy, args, overrides):
     result, calls = deploy("--skip-code", *args, answers=["", "", "", "", "y"], **overrides)
     assert result.returncode == 0, result.stderr
-    assert "触发时间 (UTC) [0 30 1 * * *]" in result.stdout
+    assert "触发时间 (UTC) / Schedule (UTC) [0 30 1 * * *]" in result.stdout
     assert any("dailyCollectSchedule=0 30 1 * * *" in call for call in calls)
 
 
@@ -516,7 +591,7 @@ def test_deployment_outputs_accept_key_casing(deploy, group_key, app_key):
     assert "--name foundry-notify-review" in outputs
     assert "-o json" in outputs
     assert "outputs:properties.outputs" in outputs
-    assert "资源组=review-group   Function App=review-app" in result.stdout
+    assert "资源组 / Resource group=review-group   Function App=review-app" in result.stdout
     assert "az functionapp show -g review-group -n review-app -o json" in calls
     assert any("config-zip -g review-group -n review-app" in call for call in calls)
 
@@ -600,7 +675,7 @@ def test_single_subscription_does_not_prompt(deploy):
     result, calls = deploy("--skip-code", answers=["", "", "", "", "y"])
     assert result.returncode == 0, result.stderr
     assert "使用唯一可用订阅" in result.stdout
-    assert "订阅 [" not in result.stdout
+    assert "订阅 / Subscription [" not in result.stdout
     assert "az account set --subscription offline-review" in calls
 
 
@@ -609,7 +684,7 @@ def test_default_subscription_is_current_not_first_in_list(deploy):
                            MOCK_SUBSCRIPTIONS='[{"name":"Other","id":"offline-other"},'
                                               '{"name":"Current","id":"offline-review"}]')
     assert result.returncode == 0, result.stderr
-    assert "订阅 [Current (offline-review)]" in result.stdout
+    assert "订阅 / Subscription [Current (offline-review)]" in result.stdout
     assert "az account set --subscription offline-review" in calls
 
 
@@ -622,7 +697,7 @@ def test_code_only_deployment_selects_subscription_before_reading_outputs(deploy
     outputs = next(index for index, call in enumerate(calls) if call.startswith("az deployment sub show"))
     assert selected < outputs
     assert "1/4" not in result.stdout
-    assert "触发时间 (UTC) [" not in result.stdout
+    assert "触发时间 (UTC) / Schedule (UTC) [" not in result.stdout
 
 
 @pytest.mark.parametrize("args, overrides", [(("-s", "offline-other"), {}),

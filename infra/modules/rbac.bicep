@@ -2,7 +2,7 @@ param storageAccountName string
 param appInsightsName string
 param identityPrincipalId string
 
-@description('Optional user object ID granted Blob/Table data access for local development.')
+@description('Optional user object ID granted Blob/Queue/Table data access for local development and portal access.')
 param userPrincipalId string = ''
 
 var roles = {
@@ -21,6 +21,7 @@ var userStorageRoles = empty(userPrincipalId)
   ? []
   : [
       roles.storageBlobDataContributor
+      roles.storageQueueDataContributor
       roles.storageTableDataContributor
     ]
 
