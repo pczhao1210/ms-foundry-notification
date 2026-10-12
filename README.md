@@ -10,6 +10,16 @@ Query today's changes, the past or next N days, the model catalog, and current p
 
 See [API and MCP](docs/api.md) for endpoints, client configuration, keys, pagination, and collection status.
 
+### MCP Tools
+
+![Available MCP tools](assets/MCP%20Tools%20snapshot.png)
+
+### Conversation Demo
+
+![Foundry Notifier conversation demo](assets/Foundry%20Notifier%20Demo%20-%202x.webp)
+
+[Watch the original video (MP4)](assets/Foundry%20Notifier%20Demo%20-%202x.mp4)
+
 ## Quick Start
 
 Requires subscription-level **Owner**, or Contributor + User Access Administrator.

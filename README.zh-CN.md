@@ -10,6 +10,16 @@
 
 端点、客户端配置、密钥、分页与采集状态详见 [API 与 MCP](docs/api.zh-CN.md)。
 
+### MCP 工具
+
+![MCP 工具列表](assets/MCP%20Tools%20snapshot.png)
+
+### 对话演示
+
+![Foundry Notifier 对话演示](assets/Foundry%20Notifier%20Demo%20-%202x.webp)
+
+[观看原始视频（MP4）](assets/Foundry%20Notifier%20Demo%20-%202x.mp4)
+
 ## 快速开始
 
 需要订阅级 **Owner**，或 Contributor + User Access Administrator 权限。
