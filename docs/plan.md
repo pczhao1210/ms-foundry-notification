@@ -1,5 +1,7 @@
 # MS Foundry 模型变更日报 — 项目规划
 
+面向读者的系统说明见 [架构与设计](architecture.zh-CN.md)（[English](architecture.md)）。本文件保留详细规划、设计决策与数据源调研记录。
+
 ## 1. 可行性结论：可行 ✅
 
 | 数据源 | 认证 | 提供信息 | 角色 |

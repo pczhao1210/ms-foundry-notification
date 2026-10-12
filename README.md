@@ -43,7 +43,7 @@ See [Deployment and Operations](docs/deployment.md) for deployment options, sche
 | [API and MCP](docs/api.md) | REST endpoints, MCP configuration, authentication, pagination |
 | [Deployment and Operations](docs/deployment.md) | Deployment options, schedules, collection health, troubleshooting, alerts |
 | [Development](docs/development.md) | Local setup, Azurite, testing, debugging, CI |
-| [Design](docs/plan.md) | Data sources, architecture, event semantics, limitations |
+| [Architecture and Design](docs/architecture.md) | Components, data flow, event semantics, reliability, security boundaries |
 | [Contributing](AGENTS.md) | Repository conventions |
 
 ## License

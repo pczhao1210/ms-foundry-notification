@@ -46,4 +46,4 @@ curl "http://localhost:7071/api/changes/past?days=7"
 - If libicu is unavailable and Core Tools reports `Couldn't find a valid ICU package`, first run `export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`.
 - Local `func start` does not validate Function Keys. Editing `function_app.py` restarts the host and interrupts running collection; changes to `core/` and other modules require a manual host restart.
 
-See [Design](plan.md) and [AGENTS.md](../AGENTS.md) for development conventions.
+See [Architecture and Design](architecture.md) for system structure and [AGENTS.md](../AGENTS.md) for development conventions.

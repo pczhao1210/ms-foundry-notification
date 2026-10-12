@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/pczhao1210/ms-foundry-notification/
 | [API 与 MCP](docs/api.zh-CN.md) | REST 端点、MCP 配置、认证、分页 |
 | [部署与运维](docs/deployment.zh-CN.md) | 部署选项、调度、采集状态、排障、告警 |
 | [开发指南](docs/development.zh-CN.md) | 本地环境、Azurite、测试、调试、CI |
-| [项目设计](docs/plan.md) | 数据源、架构、事件语义与局限 |
+| [架构与设计](docs/architecture.zh-CN.md) | 系统组成、数据流、事件语义、可靠性与安全边界 |
 | [贡献约定](AGENTS.md) | 仓库开发规范 |
 
 ## License
