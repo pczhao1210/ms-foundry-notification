@@ -7,7 +7,7 @@
 | 数据源 | 认证 | 提供信息 | 角色 |
 |---|---|---|---|
 | ARM Models API `GET /subscriptions/{sub}/providers/Microsoft.CognitiveServices/locations/{region}/models?api-version=2026-09-01` | Entra ID (Reader) | 每 region/SKU 的 `lifecycleStatus`(Preview/GenerallyAvailable/Legacy/Deprecating/Deprecated)、`replacementConfig`、`deprecation.inference/fineTune`、`skus[].deprecationDate`、`systemData.createdAt`、`format`(OpenAI/Microsoft/DeepSeek/xAI/...) | **主数据源**（官方文档明确："transitions visible in real time via the Models API"） |
-| Retirement schedule 文档 raw markdown `raw.githubusercontent.com/MicrosoftDocs/azure-ai-docs/main/articles/foundry/openai/includes/concepts-model-retirement-schedule-content.md`（文章 `concepts/model-retirement-schedule.md` 只 include 该文件） | 无 | 各厂商表格：Lifecycle / Retirement date / Replacement；覆盖 Fireworks | **补充**：Replacement、Fireworks；Git commit 历史可回填过去 7 天 |
+| Retirement schedule 文档 [Microsoft Learn 发布页](https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule)（优先 Markdown，失败回退 HTML） | 无 | 各厂商表格：Lifecycle / Retirement date / Replacement；覆盖 Fireworks | **补充**：Replacement、Fireworks；GitHub 历史仅用于可选首次回填 |
 | Retail Prices API `prices.azure.com/api/retail/prices?$filter=serviceName eq 'Foundry Models'` | 无（公开） | 各计量表当前零售价（USD）、月粒度 effectiveStartDate | **价格变化数据源**（见 §3.3）；新计量表亦作为新模型上线的辅助信号 |
 | Azure Updates RSS | 无 | GA/Preview 公告 | 可选，Phase 2 |
 
@@ -158,11 +158,14 @@ VS Code 客户端配置示例见 [API 与 MCP](api.zh-CN.md)。
 - 同一天重跑：用新结果替换该日该来源的 observed 事件（删除不再出现的行）；按分区每批 100 条事务提交
 
 ## 3.5 文档源（`core/docs.py` + `collectors/docs_schedule.py`）
-- 解析：只解析同时含模型、Lifecycle、Retirement date 列的表格（跳过 fine-tuned 表）；清理 `<sup>`、链接、强调符号与括号注释；行键 `section|vendor|model|version`（重复行加 `#n`）；fixture 解析 183 行
+- 日常来源：直接读取 Microsoft Learn 发布页 `https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule?accept=text/markdown`，不依赖 GitHub 源码仓库。下载失败、只返回 include 引用、表格或覆盖校验失败时，回退不带查询参数的同一发布页 HTML；只提取 `main` / `article` 中的标题和表格，归一化为 Markdown 后复用同一解析流程，不引入新依赖。当前开发环境无法解析 Learn 域名，真实响应格式仍需部署环境验收；新增 HTML fixture 为合成结构，不宣称是线上抓取结果。
+- 解析：只解析同时含 Model / Version / Lifecycle / Retirement date / Replacement 五列表头的表格（跳过 fine-tuned 表）；清理 `<sup>`、链接、强调符号与括号注释；行键 `section|vendor|model|version`（重复行加 `#n`）；原 Markdown fixture 解析 183 行，HTML 转换保持相同行键、事件与日期语义。
+- 采集保护：拒绝空表、未知 Lifecycle 与 HTML 合并单元格；与最近已发布快照（含同日成功结果）比较，既有行键丢失超过 20% 即拒绝，即使新增其他行导致总行数未减少也不放行。合法大规模改版需人工核实后调整校验或迁移基线，不自动清除旧数据。验证在暂存/提交前完成，失败不推进快照、不删除已有事件和计划，保留最后成功时间。
+- 诊断：下载/解析/校验失败记录来源 URL、格式、HTTP 状态（连接失败时为空）与阶段；失败报告保留 `source_url` / `stage` / `http_status`，提交失败标记 `commit`，完整异常保留在日志。诊断不包含响应正文或凭据。
 - 关联 ARM：模型名（忽略大小写）+ 版本（文档给出时）匹配；唯一匹配 → 使用 ARM 的 `model` 引用与 `billing`；多个或无匹配 → `format=null`
 - observed（source=docs）：只比较前后两个版本都存在的行的 lifecycle / 退役日 / 替代模型（`STATUS_CHANGED` / `RETIREMENT_DATE_CHANGED` / `REPLACEMENT_CHANGED`）；行增删不产生事件（模型增删以 ARM 为准，避免文档改版噪声）
 - scheduled（source=docs）：文档退役日生成 `RETIRING`；ARM 已有同一本地日期的退役计划则跳过；不一致时保留并附 `arm_retirement_dates` 便于对照（fixture 中 13 个模型两源日期不一致）
-- 首次部署回填：无 docs 快照时通过 GitHub commits API 取最近 30 天提交（含窗口起点前的基线版本），逐版本 diff 写入 observed 事件；失败只跳过回填，不影响当日采集
+- 首次部署回填：无 docs 快照时通过 GitHub commits API 取原 include 文件 `articles/foundry/openai/includes/concepts-model-retirement-schedule-content.md` 最近 30 天提交（含窗口起点前的基线版本），只下载对应 commit 的原始 Markdown，逐版本 diff 写入 observed 事件；下载或历史内容解析/校验失败只跳过回填，不影响 Learn 当日采集；不得将当前 Learn 页面用作历史版本。
 
 ## 4. 目录结构
 ```

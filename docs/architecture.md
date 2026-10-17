@@ -31,7 +31,7 @@ The diagram shows logical data flow, not additional services: the collection pip
 | Source | Role | Important boundary |
 |---|---|---|
 | ARM Models API | Primary source for model versions, regional availability, SKU status, retirement dates, replacements, and auto-upgrade dates. | Subscription-scoped visibility, not a universal catalog. Regions are discovered dynamically; all result pages are followed. |
-| Microsoft Foundry retirement documentation | Cross-checks retirement plans and supplements lifecycle changes; Git history supports best-effort initial backfill. | Documentation can lag or disagree with ARM. Events retain their source rather than silently choosing one date. |
+| Microsoft Foundry retirement documentation | Collects the [published Learn schedule](https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule), preferring Markdown with an HTML fallback; GitHub is only for best-effort initial history backfill. | Documentation can lag or disagree with ARM. Events retain their source rather than silently choosing one date. |
 | Azure Retail Prices API | Current retail token and PTU hourly prices; daily snapshots provide price-change history. | No general historical-price or future-price feed. Marketplace prices such as Anthropic are not covered. |
 
 ARM records use `kind` values `AIServices` and `MAI` to avoid duplicate catalog views. Models are identified by `(format, name, version)` and SKU entries by `(name, scope)`. Regional differences remain visible. Marketplace-required models are not excluded from lifecycle tracking; HuggingFace / managed-compute models are outside scope.
@@ -50,6 +50,8 @@ Each run executes the ARM, docs, and prices steps in sequence with isolated fail
 6. Publish the snapshot and update its latest index, remove the pending batch, and record source health.
 
 The first ARM or price snapshot establishes a baseline rather than reporting the whole catalog as newly added. Docs can backfill changes from recent Git history on first collection; failure to backfill does not stop the current day's collection.
+
+Docs must contain all five schedule columns and recognized lifecycle values. Empty results or loss of more than 20% of previously published row identities are rejected before committing; the last successful snapshot and schedules remain available. Fetch diagnostics include the source URL, HTTP status, and failure stage. Markdown that contains only an include reference is not accepted as a schedule. Current Learn content is never substituted for historical Git versions.
 
 ### Storage Layout
 

@@ -2,7 +2,7 @@ import pytest
 
 from builders import FIXTURES, arm_item, sku, snapshot
 from core import events as ev
-from core.docs import build_docs_schedule, diff_docs, parse_schedule
+from core.docs import build_docs_schedule, diff_docs, parse_schedule, schedule_html_to_markdown, validate_schedule
 
 AT = "2026-10-07T00:00:00Z"
 HEADER = (
@@ -129,3 +129,47 @@ def test_schedule_against_fixture_catalog(page):
     [nano] = [e for e in events if e["model"]["name"] == "gpt-4.1-nano"]
     assert nano["date"] == "2026-10-14"
     assert nano["details"]["arm_retirement_dates"] == ["2027-04-14"]
+
+
+def test_published_html_preserves_markdown_row_keys_and_events():
+    html = (FIXTURES / "model_retirement_schedule_published.html").read_text(encoding="utf-8")
+    actual = parse_schedule(schedule_html_to_markdown(html), collected_at=AT)
+    expected = parse_schedule(
+        HEADER
+        + "| `gpt-x` | 1 | GA | 2026-12-01 | [new-x](/replacement)<sup>1</sup> |\n"
+        + "| old | 1 | Deprecated | 2026-11-01 | — |\n"
+        + "| old | 1 | Deprecated | 2026-11-02 | — |\n"
+        + "\n## Foundry Models sold by partners and community\n\n### Example & Partner\n\n"
+        + "| Model | Version | Lifecycle | Retirement date | Replacement |\n|---|---|---|---|---|\n"
+        + "| partner-x (preview) | – | Preview | No earlier than 2027-01-01 | — |\n",
+        collected_at=AT,
+    )
+    assert actual == expected
+    validate_schedule(actual, expected)
+    assert diff_docs(expected, actual) == []
+    assert build_docs_schedule(actual) == build_docs_schedule(expected)
+
+
+@pytest.mark.parametrize("column", ["Model", "Version", "Lifecycle", "Retirement date", "Replacement"])
+def test_all_schedule_headers_are_required(column):
+    markdown = (HEADER + "| m | 1 | GA | 2027-01-01 | — |\n").replace(f"| {column} |", "| Renamed |")
+    with pytest.raises(ValueError, match="no rows"):
+        validate_schedule(parse_schedule(markdown, collected_at=AT))
+
+
+def test_validation_rejects_unknown_lifecycle_and_large_coverage_loss():
+    with pytest.raises(ValueError, match="lifecycle"):
+        validate_schedule(_docs("| m | 1 | Unknown | — | — |\n"))
+    previous = _docs("".join(f"| m{i} | 1 | GA | — | — |\n" for i in range(5)))
+    retained = _docs("".join(f"| m{i} | 1 | GA | — | — |\n" for i in range(4)))
+    validate_schedule(retained, previous)
+    # Adding unrelated rows must not hide loss of the original models/vendors.
+    changed = _docs("".join(f"| new{i} | 1 | GA | — | — |\n" for i in range(5)))
+    with pytest.raises(ValueError, match="20%"):
+        validate_schedule(changed, previous)
+
+
+def test_html_without_article_and_merged_cells_are_not_accepted():
+    assert schedule_html_to_markdown("<nav><h2>Not the article</h2></nav>") == ""
+    with pytest.raises(ValueError, match="merged cells"):
+        schedule_html_to_markdown("<main><table><tr><td colspan='2'>ambiguous</td></tr></table></main>")

@@ -86,7 +86,7 @@ class FakeSources:
         self._check("arm")
         return self.arm, self.failed_regions
 
-    def docs_markdown(self):
+    def docs_markdown(self, previous=None):
         self._check("docs")
         return DOCS_HEADER + self.docs
 
@@ -175,6 +175,52 @@ def test_source_status_preserves_last_success_when_collection_fails():
     assert status["last_success_at"] == "2026-10-06T00:00:00Z"
     assert status["snapshot_at"] == "2026-10-06T00:00:00Z"
     assert store.source_status("prices")["status"] == "complete"
+
+
+@pytest.mark.parametrize("rows", ["", "| gpt-x | 1 | GA | 2026-12-01 | — |\n"])
+@pytest.mark.parametrize("attempt", [DAY1, DAY2])
+def test_invalid_docs_preserve_snapshot_events_schedule_and_success(rows, attempt):
+    store, sources = FakeStore(), _sources()
+    pipeline.run_daily(store, sources, DAY1)
+    before = store.latest_snapshot("docs")
+    schedule = copy.deepcopy(store.schedule)
+    observed = copy.deepcopy(store.observed)
+    sources.docs = rows
+
+    report = pipeline.run_daily(store, sources, attempt)
+
+    assert report["failed"] == ["docs"]
+    assert report["docs"]["stage"] == "validate"
+    assert report["docs"]["source_url"] == pipeline.LEARN_URL
+    assert store.latest_snapshot("docs") == before
+    assert store.schedule == schedule
+    assert store.observed == observed
+    assert store.source_status("docs")["last_success_at"] == before["collected_at"]
+    assert store.source_status("docs")["snapshot_at"] == before["collected_at"]
+    assert ("2026-10-07", "docs") not in store.snapshots
+
+
+def test_invalid_history_does_not_block_current_docs():
+    sources = _sources(history=[("2026-10-05T00:00:00Z", "| m | 1 | GA | 2026-99-99 | — |\n")])
+    store = FakeStore()
+    report = pipeline.run_daily(store, sources, DAY1)
+    assert report["failed"] == []
+    assert report["docs"]["backfilled"] is None
+    assert store.latest_snapshot("docs")["collected_at"] == "2026-10-06T00:00:00Z"
+
+
+def test_docs_download_diagnostics_are_persisted(monkeypatch):
+    from collectors.docs_schedule import DocsCollectionError
+
+    store, sources = FakeStore(), _sources()
+
+    def fail(previous=None):
+        raise DocsCollectionError(source_url=pipeline.LEARN_URL, stage="download", http_status=404)
+
+    monkeypatch.setattr(sources, "docs_markdown", fail)
+    report = pipeline.run_daily(store, sources, DAY1)
+    assert report["docs"]["http_status"] == 404
+    assert store.source_status("docs")["report"] == report["docs"]
 
 
 @pytest.mark.parametrize("state", ["complete", "degraded"])
