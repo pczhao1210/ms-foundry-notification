@@ -75,7 +75,9 @@ azd auth login
 azd up        # 提示输入环境名 / 订阅 / 区域
 ```
 
-首次采集在下一个 UTC 00:00（北京时间 08:00）运行；在此之前 `/api/models`、`/api/prices` 返回 503（尚无快照），变化接口返回空结果且 `collection.complete=false`。首次运行会用文档 Git 历史回填最近 30 天的文档变化；ARM 与价格变化从第二天起产生。
+首次采集在下一个 UTC 00:00（北京时间 08:00）运行；在此之前 `/api/models`、`/api/prices` 返回 503（尚无快照），变化接口返回空结果且 `collection.complete=false`。首次运行尝试用文档 Git 历史回填最近 30 天的文档变化；仓库不可用或历史内容无效时跳过回填，不阻断 Learn 日常采集。ARM 与价格变化从第二天起产生。
+
+部署此采集器后，须验证 Function App 能访问英文 Learn 日程页，并确认 Docs 成功快照时间已刷新。采集优先 Markdown，失败回退发布页 HTML。失败时检查 `daily docs step failed` / `docs fetch failed` 日志及来源报告的 `source_url`、`stage`、`http_status`。覆盖校验失败会保留旧数据，应调查页面改版或缺失，不应清空旧快照绕过保护。
 
 采集结果先保存为待提交批次，事件及计划写入成功后才发布快照。写入中断时，下次运行会先按原日期恢复批次；同一来源的采集不能并行手工触发。ARM 区域失败会保留该区域最近成功的数据并使任务报告降级，其他来源仍继续处理；空目录不会被当作全部模型下线。部分区域缺失但有效数据已保存时，报告记入 `degraded` 并输出 WARNING，门户调用标为成功，REST/MCP 仍返回 `collection.complete=false`；采集、提交或状态写入真正失败时才记入 `failed` 并使调用失败。因此文件已生成不一定代表所有步骤成功，可在 Application Insights 中检查 `daily run report` 和异常。
 

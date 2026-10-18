@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Mapping
+from html.parser import HTMLParser
 from typing import Any
 
 from . import events as ev
@@ -18,7 +19,8 @@ SOURCE = "docs"
 _HEADING = re.compile(r"^(#{2,6})\s+(.*?)\s*#*$")
 _SEPARATOR = re.compile(r"^:?-{3,}:?$")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_SUP = re.compile(r"<sup>.*?</sup>", re.IGNORECASE)
+# Learn Markdown renders source <sup>n</sup> footnotes as ^n^.
+_SUP = re.compile(r"<sup>.*?</sup>|\^[^\s^]+\^", re.IGNORECASE)
 _TAG = re.compile(r"<[^>]+>")
 _LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _TRAILING_NOTE = re.compile(r"\s*\([^)]*\)\s*$")
@@ -30,12 +32,94 @@ _COLUMNS = {
     "retirement date": "retirement",
     "replacement": "replacement",
 }
-_REQUIRED = frozenset({"model", "lifecycle", "retirement"})
+_REQUIRED = frozenset(_COLUMNS.values())
 _FIELDS = (
     ("lifecycle", ev.STATUS_CHANGED, "lifecycle"),
     ("retirement", ev.RETIREMENT_DATE_CHANGED, "inference"),
     ("replacement", ev.REPLACEMENT_CHANGED, "replacement"),
 )
+_LIFECYCLES = frozenset({"GA", "Preview", "Legacy", "Deprecated", "Retired"})
+
+
+def validate_schedule(snapshot: Mapping[str, Any], previous: Mapping[str, Any] | None = None) -> None:
+    """Reject empty/invalid tables or a loss of more than 20% of the previous row identities."""
+    rows = snapshot["rows"]
+    if not rows:
+        raise ValueError("no rows parsed from the retirement schedule; check the page layout")
+    if any(row["lifecycle"] not in _LIFECYCLES for row in rows.values()):
+        raise ValueError("unrecognized retirement schedule lifecycle")
+    if previous and previous["rows"]:
+        retained = rows.keys() & previous["rows"].keys()
+        if len(retained) < len(previous["rows"]) * 0.8:
+            raise ValueError("retirement schedule lost more than 20% of previous row identities")
+
+
+class _ScheduleHTML(HTMLParser):
+    """Extract headings and simple tables from the published article, not site navigation."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.lines: list[str] = []
+        self._scope = 0
+        self._ignored = 0
+        self._heading: str | None = None
+        self._cell = False
+        self._text: list[str] = []
+        self._row: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"main", "article"}:
+            self._scope += 1
+        if not self._scope:
+            return
+        if tag in {"script", "style", "nav", "aside", "sup"}:
+            self._ignored += 1
+        if self._ignored:
+            return
+        if tag in {"h2", "h3", "h4", "h5", "h6"}:
+            self._heading, self._text = tag, []
+        elif tag == "table":
+            self.lines.append("")
+        elif tag == "tr":
+            self._row = []
+        elif tag in {"td", "th"} and self._row is not None:
+            if any(name in {"rowspan", "colspan"} and value != "1" for name, value in attrs):
+                raise ValueError("unsupported merged cells in retirement schedule")
+            self._cell, self._text = True, []
+        elif tag == "br" and (self._cell or self._heading):
+            self._text.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if self._scope and not self._ignored and (self._cell or self._heading):
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._scope:
+            return
+        if self._ignored:
+            if tag in {"script", "style", "nav", "aside", "sup"}:
+                self._ignored -= 1
+        elif tag == self._heading:
+            self.lines.extend(("", f"{'#' * int(tag[1])} {''.join(self._text)}", ""))
+            self._heading = None
+        elif tag in {"td", "th"} and self._cell:
+            self._row.append(" ".join("".join(self._text).split()))
+            self._cell = False
+        elif tag == "tr" and self._row is not None:
+            self.lines.append("| " + " | ".join(self._row) + " |")
+            self._row = None
+        elif tag == "table":
+            self.lines.append("")
+        if tag in {"main", "article"}:
+            self._scope -= 1
+
+
+def schedule_html_to_markdown(html: str) -> str:
+    """Extract article tables into the Markdown format used by the daily parser."""
+    parser = _ScheduleHTML()
+    parser.feed(html)
+    parser.close()
+    return "\n".join(parser.lines)
 
 
 def _clean(cell: str) -> str:
@@ -73,7 +157,12 @@ def parse_schedule(markdown: str, *, collected_at: str, commit: str | None = Non
         if columns is None:
             names = [_clean(cell).casefold() for cell in cells]
             found = {_COLUMNS[name]: i for i, name in enumerate(names) if name in _COLUMNS}
-            columns = found if _REQUIRED <= found.keys() else {}
+            if _REQUIRED <= found.keys():
+                columns = found
+            elif len(found.keys() & {"model", "lifecycle", "retirement", "replacement"}) >= 2:
+                raise ValueError("incomplete retirement schedule table headers")
+            else:
+                columns = {}
             continue
         if not columns or all(_SEPARATOR.match(cell.replace(" ", "")) for cell in cells if cell):
             continue

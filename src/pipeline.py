@@ -13,7 +13,8 @@ from typing import Any, Protocol
 from core import config
 from core import events as ev
 from core.diff import diff_models, diff_prices
-from core.docs import build_docs_schedule, diff_docs, parse_schedule
+from collectors.docs_schedule import DocsCollectionError, LEARN_URL
+from core.docs import build_docs_schedule, diff_docs, parse_schedule, validate_schedule
 from core.normalize import INCLUDED_KINDS, normalize_models
 from core.price_alias import annotate_price_events
 from core.price_parse import label_meters, normalize_prices
@@ -27,7 +28,7 @@ _MAX_LOGGED_NAMES = 50
 
 class Sources(Protocol):
     def arm_models(self) -> tuple[dict[str, list[dict[str, Any]]], list[str]]: ...
-    def docs_markdown(self) -> str: ...
+    def docs_markdown(self, previous: Mapping[str, Any] | None = None) -> str: ...
     def docs_history(self, since: str) -> list[tuple[str, str]]: ...
     def retail_prices(self) -> list[dict[str, Any]]: ...
 
@@ -45,10 +46,10 @@ class LiveSources:
         )
         return collector.collect(self._settings.regions)
 
-    def docs_markdown(self) -> str:
+    def docs_markdown(self, previous: Mapping[str, Any] | None = None) -> str:
         from collectors import docs_schedule
 
-        return docs_schedule.fetch()
+        return docs_schedule.fetch(previous=previous)
 
     def docs_history(self, since: str) -> list[tuple[str, str]]:
         from collectors import docs_schedule
@@ -104,6 +105,8 @@ def run_daily(store: Any, sources: Sources, now: datetime | None = None) -> dict
         except Exception as exc:  # noqa: BLE001 - recorded and re-raised by the caller after all steps ran
             log.exception("daily %s step failed", name)
             report[name] = {"error": type(exc).__name__}
+            if isinstance(exc, DocsCollectionError):
+                report[name].update(exc.diagnostics)
             report["failed"].append(name)
         state = "failed" if "error" in report[name] else report[name].get("status", "complete")
         status = {
@@ -160,9 +163,16 @@ def _docs_step(context: dict[str, Any]) -> dict[str, Any]:
     store, today = context["store"], context["today"]
     arm = _catalog(context)
     previous = store.latest_snapshot("docs", before=today)
-    snapshot = parse_schedule(context["sources"].docs_markdown(), collected_at=context["collected_at"])
-    if not snapshot["rows"]:
-        raise RuntimeError("no rows parsed from the retirement schedule; did the page layout change?")
+    latest = store.latest_snapshot("docs")
+    markdown = context["sources"].docs_markdown(previous=latest)
+    try:
+        snapshot = parse_schedule(markdown, collected_at=context["collected_at"])
+    except ValueError as exc:
+        raise DocsCollectionError(source_url=LEARN_URL, stage="parse") from exc
+    try:
+        validate_schedule(snapshot, latest)
+    except ValueError as exc:
+        raise DocsCollectionError(source_url=LEARN_URL, stage="validate") from exc
     report: dict[str, Any] = {"baseline_at": previous["collected_at"] if previous else None, "rows": len(snapshot["rows"])}
     if previous:
         observed = diff_docs(previous, snapshot, arm)
@@ -171,8 +181,11 @@ def _docs_step(context: dict[str, Any]) -> dict[str, Any]:
         backfill = _backfill_docs(context, arm)
         observed = backfill or []
         report["backfilled"] = len(backfill) if backfill is not None else None
-    report.update(store.commit_run(today, "docs", snapshot, observed, build_docs_schedule(snapshot, arm),
-                                   replace=previous is not None))
+    try:
+        report.update(store.commit_run(today, "docs", snapshot, observed, build_docs_schedule(snapshot, arm),
+                                       replace=previous is not None))
+    except Exception as exc:
+        raise DocsCollectionError(source_url=LEARN_URL, stage="commit") from exc
     return report
 
 
@@ -182,16 +195,18 @@ def _backfill_docs(context: Mapping[str, Any], arm: Mapping[str, Any] | None) ->
     since = ev.shift_date(today, -BACKFILL_DAYS)
     try:
         versions = context["sources"].docs_history(ev.to_utc_iso(f"{since}T00:00:00+08:00"))
+        snapshots = [parse_schedule(markdown, collected_at=at) for at, markdown in versions]
+        for snapshot in snapshots:
+            validate_schedule(snapshot)
+        events = {
+            event["id"]: event
+            for prev, curr in zip(snapshots, snapshots[1:])
+            for event in diff_docs(prev, curr, arm)
+            if since <= event["date"] <= today
+        }
     except Exception:  # noqa: BLE001 - best effort (GitHub API rate limits); daily diffs work without it
         log.warning("docs history backfill skipped", exc_info=True)
         return None
-    snapshots = [parse_schedule(markdown, collected_at=at) for at, markdown in versions]
-    events = {
-        event["id"]: event
-        for prev, curr in zip(snapshots, snapshots[1:])
-        for event in diff_docs(prev, curr, arm)
-        if since <= event["date"] <= today
-    }
     return list(events.values())
 
 

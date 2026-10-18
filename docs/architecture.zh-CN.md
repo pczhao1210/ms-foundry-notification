@@ -31,7 +31,7 @@ Foundry Notifier 是一个基于快照的变化追踪服务。定时任务采集
 | 来源 | 用途 | 重要边界 |
 |---|---|---|
 | ARM Models API | 模型版本、区域可用性、SKU 状态、退役日期、替代模型与自动升级日期的主数据源。 | 是订阅视角，不是全局完整目录；动态发现区域并读取所有分页。 |
-| Microsoft Foundry 退役文档 | 交叉校验退役计划、补充生命周期变化；首次采集时通过 Git 历史尽力回填。 | 可能滞后于 ARM 或与之不一致，保留事件来源，不静默选择某一日期。 |
+| Microsoft Foundry 退役文档 | 日常读取 [Learn 发布页](https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule)，优先 Markdown，失败回退 HTML；GitHub 仅用于首次历史尽力回填。 | 可能滞后于 ARM 或与之不一致，保留事件来源，不静默选择某一日期。 |
 | Azure Retail Prices API | 当前 token 零售价与 PTU 小时价，通过每日快照积累价格变化历史。 | 没有通用的历史价格或未来价格数据流；不覆盖 Anthropic 等 Marketplace 价格。 |
 
 ARM 只采用 `kind` 为 `AIServices` 与 `MAI` 的记录，避免重复目录视图。模型标识为 `(format, name, version)`，SKU 标识为 `(name, scope)`，保留区域差异。需要 Marketplace 的模型仍纳入生命周期追踪；HuggingFace / managed compute 不在范围内。
@@ -50,6 +50,8 @@ ARM 只采用 `kind` 为 `AIServices` 与 `MAI` 的记录，避免重复目录�
 6. 发布快照、更新最新索引、删除待提交批次，再记录来源健康状态。
 
 ARM 与价格的首份快照只建立基线，不把整个目录报告为新上线。文档首次采集可通过近期 Git 历史回填；回填失败不阻断当天采集。
+
+文档必须包含完整五列表头及已知生命周期。空结果或既有行键丢失超过 20% 时在提交前拒绝，保留最后成功快照和计划；下载诊断包含来源 URL、HTTP 状态与失败阶段。只有 include 引用的 Markdown 不视为有效日程，也不会将当前 Learn 页面冒充 Git 历史版本。
 
 ### 存储布局
 
