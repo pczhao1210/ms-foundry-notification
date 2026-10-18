@@ -158,8 +158,8 @@ VS Code 客户端配置示例见 [API 与 MCP](api.zh-CN.md)。
 - 同一天重跑：用新结果替换该日该来源的 observed 事件（删除不再出现的行）；按分区每批 100 条事务提交
 
 ## 3.5 文档源（`core/docs.py` + `collectors/docs_schedule.py`）
-- 日常来源：直接读取 Microsoft Learn 发布页 `https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule?accept=text/markdown`，不依赖 GitHub 源码仓库。下载失败、只返回 include 引用、表格或覆盖校验失败时，回退不带查询参数的同一发布页 HTML；只提取 `main` / `article` 中的标题和表格，归一化为 Markdown 后复用同一解析流程，不引入新依赖。当前开发环境无法解析 Learn 域名，真实响应格式仍需部署环境验收；新增 HTML fixture 为合成结构，不宣称是线上抓取结果。
-- 解析：只解析同时含 Model / Version / Lifecycle / Retirement date / Replacement 五列表头的表格（跳过 fine-tuned 表）；清理 `<sup>`、链接、强调符号与括号注释；行键 `section|vendor|model|version`（重复行加 `#n`）；原 Markdown fixture 解析 183 行，HTML 转换保持相同行键、事件与日期语义。
+- 日常来源：直接读取 Microsoft Learn 发布页 `https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule?accept=text/markdown`，不依赖 GitHub 源码仓库。下载失败、只返回 include 引用、表格或覆盖校验失败时，回退不带查询参数的同一发布页 HTML；只提取 `main` / `article` 中的标题和表格，归一化为 Markdown 后复用同一解析流程，不引入新依赖。响应头未声明 charset 时按 UTF-8 严格解码（Learn HTML 仅在 meta 声明 UTF-8），解码失败按解析失败处理。2026-10-18 实测 Markdown 与 HTML 均解析 171 行，行键一致且无差异事件；HTML fixture 为合成结构。
+- 解析：只解析同时含 Model / Version / Lifecycle / Retirement date / Replacement 五列表头的表格（跳过 fine-tuned 表）；清理 `<sup>` 及 Learn Markdown 的 `^n^` 脚注、链接、强调符号与括号注释；行键 `section|vendor|model|version`（重复行加 `#n`）；原 Markdown fixture 解析 183 行，HTML 转换保持相同行键、事件与日期语义。
 - 采集保护：拒绝空表、未知 Lifecycle 与 HTML 合并单元格；与最近已发布快照（含同日成功结果）比较，既有行键丢失超过 20% 即拒绝，即使新增其他行导致总行数未减少也不放行。合法大规模改版需人工核实后调整校验或迁移基线，不自动清除旧数据。验证在暂存/提交前完成，失败不推进快照、不删除已有事件和计划，保留最后成功时间。
 - 诊断：下载/解析/校验失败记录来源 URL、格式、HTTP 状态（连接失败时为空）与阶段；失败报告保留 `source_url` / `stage` / `http_status`，提交失败标记 `commit`，完整异常保留在日志。诊断不包含响应正文或凭据。
 - 关联 ARM：模型名（忽略大小写）+ 版本（文档给出时）匹配；唯一匹配 → 使用 ARM 的 `model` 引用与 `billing`；多个或无匹配 → `format=null`

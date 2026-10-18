@@ -52,16 +52,18 @@ def _docs_http(monkeypatch, responses):
     return http
 
 
-def _response(text="", status=200):
-    response = Mock(text=text, status_code=status)
-    if status >= 400:
-        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+def _response(body="", status=200, content_type="text/html"):
+    response = requests.Response()
+    response.status_code = status
+    response.headers["Content-Type"] = content_type
+    response._content = body if isinstance(body, bytes) else body.encode("utf-8")
+    response.encoding = requests.utils.get_encoding_from_headers(response.headers)
     return response
 
 
 def test_docs_prefers_published_markdown_without_github(monkeypatch):
     markdown = (FIXTURES / "model_retirement_schedule_2026-10-05.md").read_text(encoding="utf-8")
-    http = _docs_http(monkeypatch, [_response(markdown)])
+    http = _docs_http(monkeypatch, [_response(markdown, content_type="text/markdown; charset=utf-8")])
     assert docs_schedule.fetch() == markdown
     http.get.assert_called_once_with(
         f"{docs_schedule.LEARN_URL}?accept=text/markdown", timeout=docs_schedule._http.TIMEOUT
@@ -73,6 +75,7 @@ def test_docs_prefers_published_markdown_without_github(monkeypatch):
     "<html><main>HTML instead of Markdown</main></html>",
     "| Model | Retirement date |\n|---|---|\n| m | 2027-01-01 |",
     "empty page",
+    b"| Model | Version | Lifecycle | Retirement date | Replacement |\n| m | 1 | GA | \xff | x |",
     404,
     requests.Timeout(),
 ])
@@ -103,6 +106,18 @@ def test_docs_failures_include_safe_diagnostics(monkeypatch, last, stage, status
     assert caught.value.diagnostics == {
         "source_url": docs_schedule.LEARN_URL, "stage": stage, "http_status": status,
     }
+
+
+def test_docs_html_without_header_charset_is_decoded_as_utf8(monkeypatch):
+    from core.docs import diff_docs, parse_schedule
+
+    html = (FIXTURES / "model_retirement_schedule_published.html").read_text(encoding="utf-8")
+    previous = parse_schedule(docs_schedule.schedule_html_to_markdown(html), collected_at="2026-10-17T00:00:00Z")
+    raw = html.replace("&mdash;", "—").replace("&ndash;", "–").encode("utf-8")
+    _docs_http(monkeypatch, [_response(status=404), _response(raw)])
+    current = parse_schedule(docs_schedule.fetch(previous=previous), collected_at="2026-10-18T00:00:00Z")
+    assert current["rows"] == previous["rows"]
+    assert diff_docs(previous, current) == []
 
 
 def test_docs_historical_ref_never_uses_current_learn_page(monkeypatch):

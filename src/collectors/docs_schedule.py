@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -17,6 +18,7 @@ PATH = "articles/foundry/openai/includes/concepts-model-retirement-schedule-cont
 RAW = "https://raw.githubusercontent.com"
 COMMITS = f"https://api.github.com/repos/{REPO}/commits"
 LEARN_URL = "https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule"
+_CHARSET = re.compile(r"charset\s*=\s*[\"']?([^;\s\"']+)", re.IGNORECASE)
 log = logging.getLogger(__name__)
 
 
@@ -24,6 +26,12 @@ class DocsCollectionError(RuntimeError):
     def __init__(self, *, source_url: str, stage: str, http_status: int | None = None) -> None:
         self.diagnostics = {"source_url": source_url, "stage": stage, "http_status": http_status}
         super().__init__(f"docs collection failed: source={source_url} stage={stage} http_status={http_status}")
+
+
+def _decode(response: requests.Response) -> str:
+    # Learn HTML declares UTF-8 only in <meta>; Requests would otherwise decode text/* as ISO-8859-1.
+    charset = _CHARSET.search(response.headers.get("Content-Type", ""))
+    return response.content.decode(charset.group(1) if charset else "utf-8")
 
 
 def fetch(ref: str | None = None, *, previous: Mapping[str, Any] | None = None) -> str:
@@ -40,14 +48,15 @@ def fetch(ref: str | None = None, *, previous: Mapping[str, Any] | None = None) 
                 status = response.status_code
                 response.raise_for_status()
                 stage = "parse"
-                markdown = response.text if content_format == "markdown" else schedule_html_to_markdown(response.text)
+                text = _decode(response)
+                markdown = text if content_format == "markdown" else schedule_html_to_markdown(text)
                 snapshot = parse_schedule(markdown, collected_at="1970-01-01T00:00:00Z")
                 stage = "validate"
                 validate_schedule(snapshot, previous)
                 log.info("docs fetched: source=%s format=%s http_status=%s rows=%s",
                          url, content_format, status, len(snapshot["rows"]))
                 return markdown
-            except (requests.RequestException, ValueError) as exc:
+            except (requests.RequestException, LookupError, ValueError) as exc:
                 log.warning("docs fetch failed: source=%s format=%s http_status=%s stage=%s error=%s",
                             url, content_format, status, stage, type(exc).__name__)
                 if content_format == "html":

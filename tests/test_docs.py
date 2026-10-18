@@ -70,6 +70,19 @@ def test_cleans_cells():
     assert rows["azure|Azure OpenAI|m|1"]["retirement_note"] == "No earlier than 2027-01-01"
 
 
+@pytest.mark.parametrize("cell", ["new-a^1^, new-b^1^", "new-a<sup>1</sup>, new-b<sup>1</sup>"])
+def test_markdown_footnote_formats_match_published_html(cell):
+    html = (
+        "<main><h2>Foundry Models sold by Azure</h2><h3>Azure OpenAI</h3><table>"
+        "<tr><th>Model</th><th>Version</th><th>Lifecycle</th><th>Retirement date</th><th>Replacement</th></tr>"
+        "<tr><td>m</td><td>1</td><td>GA</td><td>2027-01-01</td><td>new-a<sup>1</sup>, new-b<sup>1</sup></td></tr>"
+        "</table></main>"
+    )
+    actual = _docs(f"| m | 1 | GA | 2027-01-01 | {cell} |\n")
+    assert actual == parse_schedule(schedule_html_to_markdown(html), collected_at=AT)
+    assert actual["rows"]["azure|Azure OpenAI|m|1"]["replacement"] == "new-a, new-b"
+
+
 def test_duplicate_rows_get_distinct_keys(page):
     assert "azure|Azure OpenAI|gpt-realtime-mini|2025-10-06#2" in page["rows"]
     rows = _docs("| m | 1 | GA | 2027-01-01 | — |\n| m | 1 | GA | 2027-02-01 | — |\n")["rows"]

@@ -19,7 +19,8 @@ SOURCE = "docs"
 _HEADING = re.compile(r"^(#{2,6})\s+(.*?)\s*#*$")
 _SEPARATOR = re.compile(r"^:?-{3,}:?$")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_SUP = re.compile(r"<sup>.*?</sup>", re.IGNORECASE)
+# Learn Markdown renders source <sup>n</sup> footnotes as ^n^.
+_SUP = re.compile(r"<sup>.*?</sup>|\^[^\s^]+\^", re.IGNORECASE)
 _TAG = re.compile(r"<[^>]+>")
 _LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _TRAILING_NOTE = re.compile(r"\s*\([^)]*\)\s*$")

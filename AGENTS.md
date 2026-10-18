@@ -24,7 +24,7 @@
   - `lifecycleStatus` 取值：`Preview` / `GenerallyAvailable` / `Legacy` / `Deprecating` / `Deprecated`
   - API 术语 ≠ 文档术语：`Deprecating`=文档的 Deprecated（仅存量客户）；`Deprecated` 或 `deprecation.inference < today` = Retired（410）
   - 计划事件日期来源：`deprecation.inference/fineTune`、`skus[].deprecationDate`、`replacementConfig.autoUpgradeStartDate`
-- 辅助数据源：Microsoft Learn 发布页 `https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule`，优先 `?accept=text/markdown`，下载或表格/覆盖校验失败时回退正文 HTML；GitHub `MicrosoftDocs/azure-ai-docs` 的原 include 文件及 commit 历史仅用于可选首次回填，不得用当前页面冒充历史版本。拒绝空表、未知生命周期、缺失必需表头及超过 20% 的既有行键丢失；失败保留旧快照。
+- 辅助数据源：Microsoft Learn 发布页 `https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule`，优先 `?accept=text/markdown`，下载或表格/覆盖校验失败时回退正文 HTML；GitHub `MicrosoftDocs/azure-ai-docs` 的原 include 文件及 commit 历史仅用于可选首次回填，不得用当前页面冒充历史版本。HTML 响应头无 charset，须按 UTF-8 严格解码；Learn Markdown 脚注为 `^n^`，须与 `<sup>` 同样清理。拒绝空表、未知生命周期、缺失必需表头及超过 20% 的既有行键丢失；失败保留旧快照。
 - 价格数据源：Retail Prices API `https://prices.azure.com/api/retail/prices?$filter=serviceName eq 'Foundry Models'`（公开免认证，跟随 `NextPageLink`，约 35k 行）
   - 只有当前价、无历史、无未来价 → 价格变化 = 每日快照 diff
   - 与 ARM 模型**无 meterId 关联**（`skus[].cost` 为空），`armSkuName` 不可信；按 `productName/skuName/meterName` 解析 + `core/price_alias.py` 别名表映射，映射失败标 `mapped=false` 但不丢弃
