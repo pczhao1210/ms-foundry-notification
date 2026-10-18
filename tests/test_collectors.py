@@ -125,3 +125,44 @@ def test_docs_partial_markdown_tries_html_before_failing_coverage(monkeypatch):
     http = _docs_http(monkeypatch, [_response(partial), _response(html)])
     assert docs_schedule.fetch(previous=previous) == full
     assert http.get.call_count == 2
+
+
+def test_incomplete_small_schedule_table_falls_back_and_invalid_html_fails(monkeypatch):
+    from core.docs import parse_schedule
+
+    markdown_header = (
+        "## Foundry Models sold by Azure\n\n### Azure OpenAI\n\n"
+        "| Model | Version | Lifecycle | Retirement date | Replacement |\n|---|---|---|---|---|\n"
+    )
+    rows = "".join(f"| m{i} | 1 | GA | 2027-01-01 | — |\n" for i in range(5))
+    table = (
+        "| Model | Version | Lifecycle | Retirement date | Replacement |\n|---|---|---|---|---|\n"
+        "| partner-model | 1 | GA | 2027-01-01 | — |\n"
+    )
+    previous_markdown = markdown_header + rows + "\n### Partner\n\n" + table
+    broken_table = table.replace("| Version |", "| Training version |")
+    partial_markdown = markdown_header + rows + "\n### Partner\n\n" + broken_table
+    previous = parse_schedule(previous_markdown, collected_at="2026-10-13T00:00:00Z")
+    assert len(parse_schedule(markdown_header + rows, collected_at="2026-10-17T00:00:00Z")["rows"]) == 5
+    valid_html = (
+        "<main><h2>Foundry Models sold by Azure</h2><h3>Azure OpenAI</h3><table>"
+        "<tr><th>Model</th><th>Version</th><th>Lifecycle</th><th>Retirement date</th><th>Replacement</th></tr>"
+        + "".join(
+            f"<tr><td>m{i}</td><td>1</td><td>GA</td><td>2027-01-01</td><td>—</td></tr>"
+            for i in range(5)
+        )
+        + "</table><h3>Partner</h3><table>"
+        "<tr><th>Model</th><th>Version</th><th>Lifecycle</th><th>Retirement date</th><th>Replacement</th></tr>"
+        "<tr><td>partner-model</td><td>1</td><td>GA</td><td>2027-01-01</td><td>—</td></tr>"
+        "</table></main>"
+    )
+
+    http = _docs_http(monkeypatch, [_response(partial_markdown), _response(valid_html)])
+    assert docs_schedule.fetch(previous=previous) != partial_markdown
+    assert http.get.call_count == 2
+
+    invalid_html = valid_html.replace("<th>Replacement</th>", "<th>New column</th>")
+    _docs_http(monkeypatch, [_response(partial_markdown), _response(invalid_html)])
+    with pytest.raises(docs_schedule.DocsCollectionError) as caught:
+        docs_schedule.fetch(previous=previous)
+    assert caught.value.diagnostics["stage"] == "parse"

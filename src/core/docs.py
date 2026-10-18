@@ -156,7 +156,12 @@ def parse_schedule(markdown: str, *, collected_at: str, commit: str | None = Non
         if columns is None:
             names = [_clean(cell).casefold() for cell in cells]
             found = {_COLUMNS[name]: i for i, name in enumerate(names) if name in _COLUMNS}
-            columns = found if _REQUIRED <= found.keys() else {}
+            if _REQUIRED <= found.keys():
+                columns = found
+            elif len(found.keys() & {"model", "lifecycle", "retirement", "replacement"}) >= 2:
+                raise ValueError("incomplete retirement schedule table headers")
+            else:
+                columns = {}
             continue
         if not columns or all(_SEPARATOR.match(cell.replace(" ", "")) for cell in cells if cell):
             continue

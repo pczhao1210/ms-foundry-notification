@@ -44,6 +44,20 @@ def test_fine_tuned_table_with_other_columns_is_skipped(page):
     assert parse_schedule(text, collected_at=AT)["rows"] == {}
 
 
+@pytest.mark.parametrize("column", ["Version", "Replacement"])
+def test_incomplete_small_schedule_table_headers_raise(column):
+    rows = "".join(f"| m{i} | 1 | GA | 2027-01-01 | — |\n" for i in range(5))
+    small_table = (
+        "| Model | Version | Lifecycle | Retirement date | Replacement |\n|---|---|---|---|---|\n"
+        "| partner-model | 1 | GA | 2027-01-01 | — |\n"
+    )
+    markdown = (
+        HEADER + rows + "\n### Partner\n\n" + small_table.replace(f"| {column} |", "| Renamed |")
+    )
+    with pytest.raises(ValueError, match="incomplete retirement schedule table headers"):
+        parse_schedule(markdown, collected_at=AT)
+
+
 def test_cleans_cells():
     rows = _docs(
         "| **claude-x** (gated research preview) | — | Preview | 2027-04-02 | [new-a](../a.md)<sup>1</sup>, new-b<sup>1</sup> |\n"
@@ -153,7 +167,7 @@ def test_published_html_preserves_markdown_row_keys_and_events():
 @pytest.mark.parametrize("column", ["Model", "Version", "Lifecycle", "Retirement date", "Replacement"])
 def test_all_schedule_headers_are_required(column):
     markdown = (HEADER + "| m | 1 | GA | 2027-01-01 | — |\n").replace(f"| {column} |", "| Renamed |")
-    with pytest.raises(ValueError, match="no rows"):
+    with pytest.raises(ValueError, match="incomplete retirement schedule table headers"):
         validate_schedule(parse_schedule(markdown, collected_at=AT))
 
 

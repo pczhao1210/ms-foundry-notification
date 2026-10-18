@@ -177,9 +177,18 @@ def test_source_status_preserves_last_success_when_collection_fails():
     assert store.source_status("prices")["status"] == "complete"
 
 
-@pytest.mark.parametrize("rows", ["", "| gpt-x | 1 | GA | 2026-12-01 | — |\n"])
+@pytest.mark.parametrize("rows, stage", [
+    ("", "validate"),
+    ("| gpt-x | 1 | GA | 2026-12-01 | — |\n", "validate"),
+    (
+        "| gpt-x | 1 | GA | 2026-12-01 | — |\n| old | 1 | GA | 2026-11-01 | — |\n"
+        "\n### Partner\n\n| Model | Version | Lifecycle | Retirement date |\n|---|---|---|---|\n"
+        "| partner-model | 1 | GA | 2027-01-01 |\n",
+        "parse",
+    ),
+])
 @pytest.mark.parametrize("attempt", [DAY1, DAY2])
-def test_invalid_docs_preserve_snapshot_events_schedule_and_success(rows, attempt):
+def test_invalid_docs_preserve_snapshot_events_schedule_and_success(rows, stage, attempt):
     store, sources = FakeStore(), _sources()
     pipeline.run_daily(store, sources, DAY1)
     before = store.latest_snapshot("docs")
@@ -190,7 +199,7 @@ def test_invalid_docs_preserve_snapshot_events_schedule_and_success(rows, attemp
     report = pipeline.run_daily(store, sources, attempt)
 
     assert report["failed"] == ["docs"]
-    assert report["docs"]["stage"] == "validate"
+    assert report["docs"]["stage"] == stage
     assert report["docs"]["source_url"] == pipeline.LEARN_URL
     assert store.latest_snapshot("docs") == before
     assert store.schedule == schedule
